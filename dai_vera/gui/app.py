@@ -2,6 +2,7 @@ import customtkinter as ctk
 
 from dai_vera.gui.theme import THEME
 from dai_vera.gui.components.navigation import TopNav, PAGES
+from dai_vera.gui.state import AppState
 
 from dai_vera.gui.pages.import_ct import ImportCTPage
 from dai_vera.gui.pages.curves_roi import CurvesROIPage
@@ -28,8 +29,15 @@ class DAIVeraApp(ctk.CTk):
         ctk.set_appearance_mode("dark")
         self.configure(fg_color=THEME["bg"])
 
+        # shared state across pages
+        self.app_state = AppState()
+
         self.current_key = "import_ct"
         self.page_instance = None
+
+        # responsive root grid
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
         self.nav = TopNav(
             self,
@@ -37,10 +45,24 @@ class DAIVeraApp(ctk.CTk):
             on_next=self.go_next,
             get_current_key=lambda: self.current_key,
         )
-        self.nav.pack(fill="x", padx=14, pady=(14, 8))
+        self.nav.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
 
         self.content = ctk.CTkFrame(self, fg_color=THEME["bg"])
-        self.content.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        self.content.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
+
+        # fullscreen toggles
+        self._is_fullscreen = False
+
+        def toggle_fullscreen(_event=None):
+            self._is_fullscreen = not self._is_fullscreen
+            self.attributes("-fullscreen", self._is_fullscreen)
+
+        def exit_fullscreen(_event=None):
+            self._is_fullscreen = False
+            self.attributes("-fullscreen", False)
+
+        self.bind("<F11>", toggle_fullscreen)
+        self.bind("<Escape>", exit_fullscreen)
 
         self.show_page(self.current_key)
 
@@ -50,7 +72,8 @@ class DAIVeraApp(ctk.CTk):
 
         self.current_key = key
         page_cls = PAGE_CLASSES[key]
-        self.page_instance = page_cls(self.content)
+        # ✅ pass shared state to every page
+        self.page_instance = page_cls(self.content, app_state=self.app_state)
         self.page_instance.pack(fill="both", expand=True)
 
         self.nav.refresh()
