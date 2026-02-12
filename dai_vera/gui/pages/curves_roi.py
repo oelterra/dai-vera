@@ -5,6 +5,10 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from dai_vera.gui.theme import THEME, FONTS
+import numpy as np 
+from datetime import datetime 
+
+from dai_vera.roi import ROI
 
 
 class CurvesROIPage(ctk.CTkFrame):
@@ -280,10 +284,20 @@ class CurvesROIPage(ctk.CTkFrame):
     def _on_ctp_time_change(self, _=None):
         self.lbl_ctp_time_val.configure(text=str(int(self.var_ctp_time.get())))
         self.state.ctp_time = int(self.var_ctp_time.get())
-
+        
     def _on_set_pre_lesion(self):
-        pass
+        # button callback to gather current coordinates and call on main workflow
+        x = self.current_x 
+        y = self.current_y
+        z = self.var_ctp_slice.get() - 1
 
+        # update state 
+        roi = self.state.set_pre_lesion(x, y, z)
+        
+        # update UI using the ROI
+        self.draw_pre_roi(roi)
+        self.udpate_pre_curve(roi) 
+        
     def _on_set_post_lesion(self):
         pass
 
@@ -409,7 +423,18 @@ class CurvesROIPage(ctk.CTkFrame):
         def on_click(event):
             if event.xdata is None or event.ydata is None:
                 return
-            block.points.append((float(event.xdata), float(event.ydata)))
+            x = float(event.xdata)
+            y = float(event.ydata)
+
+            # restrict to selected time window
+            if not (block.range_start <= x <= block.range_end):
+                return 
+            
+            x = round(x) 
+
+            block.points.append((x, y))
+            # block.points.append((float(event.xdata), float(event.ydata)))
+            block.points.sort(key=lambda p: p[0])
             self._redraw_curve(block)
 
         block.canvas.mpl_connect("button_press_event", on_click)
@@ -495,3 +520,5 @@ class CurvesROIPage(ctk.CTkFrame):
     def _curve_clear(self, block):
         block.points = []
         self._redraw_curve(block)
+
+    
