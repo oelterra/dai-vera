@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional, Dict, Any
 
 
 @dataclass
@@ -6,6 +7,12 @@ class AppState:
     # Uploads
     ctp_folder: str = ""
     cta_folder: str = ""
+
+    ctp_volume: Optional[Dict[str, Any]] = None
+    cta_volume: Optional[Dict[str, Any]] = None
+
+    ctp_vendor: str = ""
+    cta_vendor: str = ""
 
     # Shared slice/time (persist across pages)
     ctp_slice: int = 12
