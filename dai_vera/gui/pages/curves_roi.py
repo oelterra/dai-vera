@@ -5,6 +5,10 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from dai_vera.gui.theme import THEME, FONTS
+import numpy as np 
+from datetime import datetime 
+
+from dai_vera.roi import ROI
 
 
 class CurvesROIPage(ctk.CTkFrame):
@@ -63,10 +67,22 @@ class CurvesROIPage(ctk.CTkFrame):
         content.grid_columnconfigure(0, weight=1)
         content.grid_columnconfigure(1, weight=0)
 
-        # Placeholder image canvas (you’ll replace with actual DICOM view later)
+        # Placeholder image canvas (replace with actual DICOM view later)
         img_box = ctk.CTkFrame(content, fg_color=THEME["panel_3"], corner_radius=14, height=280)
         img_box.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         img_box.grid_propagate(False)
+
+        self.img_canvas = tk.Canvas(
+            img_box,
+            bg="black",
+            highlightthickness=0
+        )
+        self.img_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        self.current_x = None
+        self.current_y = None
+
+        self.img_canvas.bind("<Button-1>", self._on_image_click)
 
         self.lbl_ctp_source = ctk.CTkLabel(
             img_box,
@@ -253,6 +269,62 @@ class CurvesROIPage(ctk.CTkFrame):
         )
         self.chk_height_positive.grid(row=0, column=2, sticky="e", padx=(12, 0))
 
+    def _on_image_click(self, event):
+        self.current_x = event.x
+        self.current_y = event.y
+        self._draw_crosshair(event.x, event.y)
+
+    def _draw_crosshair(self, x, y):
+        self.img_canvas.delete("crosshair")
+        size = 6
+        self.img_canvas.create_line(
+            x - size, y, x + size, y,
+            fill="red", width=2, tags="crosshair"
+        )
+        self.img_canvas.create_line(
+            x, y - size, x, y + size,
+            fill="red", width=2, tags="crosshair"
+        )
+    def draw_pre_roi(self, roi):
+        self.img_canvas.delete("pre_roi")
+
+        half = roi.size // 2
+
+        x0 = self.current_x - half
+        y0 = self.current_y - half
+        x1 = self.current_x + half
+        y1 = self.current_y + half
+
+        self.img_canvas.create_rectangle(
+            x0, y0, x1, y1,
+            outline="lime",
+            width=2,
+            tags="pre_roi"
+        )
+    
+    # placeholder curve generator
+    def update_pre_curve(self, roi):
+        # first curve block
+        block = self.right.winfo_children()[0]
+
+        block.points = []
+
+        times = np.arange(0, 11)
+
+        baseline = 40
+        peak = 250
+        peak_time = 4
+
+        values = baseline + peak * np.exp(-(times - peak_time) ** 2 / 4)
+
+        if self.var_height_positive.get():
+            values = np.abs(values)
+
+        for t, v in zip(times, values):
+            block.points.append((float(t), float(v)))
+
+        self._redraw_curve(block)
+
     def _slider_line(self, parent, label, var, row):
         line = ctk.CTkFrame(parent, fg_color="transparent")
         line.grid(row=row, column=0, sticky="ew", padx=14, pady=6)
@@ -280,10 +352,31 @@ class CurvesROIPage(ctk.CTkFrame):
     def _on_ctp_time_change(self, _=None):
         self.lbl_ctp_time_val.configure(text=str(int(self.var_ctp_time.get())))
         self.state.ctp_time = int(self.var_ctp_time.get())
-
+        
     def _on_set_pre_lesion(self):
-        pass
+        if self.current_x is None or self.current_y is None:
+            return
 
+        size = int(self.var_sample_roi.get().split("x")[0].strip())
+
+        class FakeROI:
+            def __init__(self, x, y, z, size):
+                self.x = x
+                self.y = y
+                self.z = z
+                self.size = size
+
+        roi = FakeROI(
+            x=self.current_x,
+            y=self.current_y,
+            z=self.var_ctp_slice.get() - 1,
+            size=size
+        )
+
+        self.draw_pre_roi(roi)
+        self.update_pre_curve(roi)
+
+        
     def _on_set_post_lesion(self):
         pass
 
@@ -409,7 +502,18 @@ class CurvesROIPage(ctk.CTkFrame):
         def on_click(event):
             if event.xdata is None or event.ydata is None:
                 return
-            block.points.append((float(event.xdata), float(event.ydata)))
+            x = float(event.xdata)
+            y = float(event.ydata)
+
+            # restrict to selected time window
+            if not (block.range_start <= x <= block.range_end):
+                return 
+            
+            x = round(x) 
+
+            block.points.append((x, y))
+            # block.points.append((float(event.xdata), float(event.ydata)))
+            block.points.sort(key=lambda p: p[0])
             self._redraw_curve(block)
 
         block.canvas.mpl_connect("button_press_event", on_click)
@@ -495,3 +599,5 @@ class CurvesROIPage(ctk.CTkFrame):
     def _curve_clear(self, block):
         block.points = []
         self._redraw_curve(block)
+
+    
