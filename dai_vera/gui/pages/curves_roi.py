@@ -3,6 +3,10 @@ import tkinter as tk
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from skimage.filters import threshold_otsu
+from skimage.measure import label, regionprops
+from skimage.segmentation import find_boundaries
+from skimage.morphology import binary_erosion
 
 from dai_vera.gui.theme import THEME, FONTS
 import numpy as np 
@@ -10,6 +14,61 @@ from datetime import datetime
 
 from dai_vera.roi import ROI
 
+# get contour indices
+def detect_roi_contour(image, x, y, window):
+    half = window // 2
+    sx = max(0, x - half)
+    sy = max(0, y - half)
+    ex = min(image.shape[0], x + half)
+    ey = min(image.shape[1], y + half)
+
+    block = image[sx:ex, sy:ey]
+    if block.size == 0:
+        return None
+    if block.max() == block.min():
+        return None
+
+    # MATLAB uses graythresh on full image, not just block
+    # approximate by using full image percentile as threshold
+    level = threshold_otsu(image)
+    block_binary = block > level
+
+    labeled = label(block_binary)
+    if labeled.max() == 0:
+        return None
+
+    regions = regionprops(labeled)
+    largest = max(regions, key=lambda r: r.area)
+
+    # filled mask of largest region
+    filled_mask = np.zeros_like(block_binary)
+    filled_mask[largest.coords[:, 0], largest.coords[:, 1]] = True
+
+    # boundary only = filled minus eroded (matches MATLAB bwperim)
+    eroded = binary_erosion(filled_mask)
+    boundary = filled_mask & ~eroded
+
+    # filled coords for curve sampling (interior pixels)
+    filled_coords = largest.coords.copy()
+    filled_coords[:, 0] += sx
+    filled_coords[:, 1] += sy
+
+    # boundary coords for overlay drawing
+    bY, bX = np.where(boundary)
+    boundary_coords = np.column_stack((bY + sx, bX + sy))
+
+    # measurements matching MATLAB getLongAndShortAxis
+    props = regionprops(filled_mask.astype(int))[0]
+    long_axis = props.major_axis_length
+    short_axis = props.minor_axis_length
+
+    return {
+        "filled_coords": filled_coords,    # for curve sampling
+        "boundary_coords": boundary_coords, # for overlay drawing
+        "long_axis": long_axis,
+        "short_axis": short_axis,
+        "area": largest.area,
+    }
 
 class CurvesROIPage(ctk.CTkFrame):
     key = "curves_roi"
@@ -43,11 +102,18 @@ class CurvesROIPage(ctk.CTkFrame):
         self.right.grid_columnconfigure(0, weight=1)
 
         # Build left + right sections
+        self.pre_lesion_block = None
+        self.post_lesion_block = None
         self._build_left_ctp_and_controls()
         self._build_right_graphs()
+        
 
         # movie control
         self._movie_after_id = None
+        self.after(80, self._render_ctp_image)
+        self.after(100, self._inject_test_volume)
+
+        self._last_contour_coords = None
 
     # ---------------- LEFT ----------------
     def _build_left_ctp_and_controls(self):
@@ -100,7 +166,10 @@ class CurvesROIPage(ctk.CTkFrame):
 
         self.var_ctp_slice = ctk.IntVar(value=int(self.state.ctp_slice))
         self.slider_ctp_slice = ctk.CTkSlider(
-            slice_col, from_=1, to=100, number_of_steps=99,
+            slice_col, 
+            from_=0, 
+            to=100, 
+            number_of_steps=100,
             orientation="vertical",
             variable=self.var_ctp_slice,
             fg_color=THEME["border"],
@@ -126,7 +195,10 @@ class CurvesROIPage(ctk.CTkFrame):
 
         self.var_ctp_time = ctk.IntVar(value=int(self.state.ctp_time))
         self.slider_ctp_time = ctk.CTkSlider(
-            time_row, from_=1, to=100, number_of_steps=99,
+            time_row, 
+            from_=0, 
+            to=100, 
+            number_of_steps=100,
             variable=self.var_ctp_time,
             fg_color=THEME["border"],
             progress_color=THEME["accent"],
@@ -268,6 +340,16 @@ class CurvesROIPage(ctk.CTkFrame):
             text_color=THEME["text"],
         )
         self.chk_height_positive.grid(row=0, column=2, sticky="e", padx=(12, 0))
+    
+    def draw_contour(self, boundary_coords):
+        """Draw vessel boundary outline — matches MATLAB getROIOverlayed."""
+        self._last_contour_coords = boundary_coords
+        self.img_canvas.delete("roi_contour")
+        for x, y in boundary_coords:
+            self.img_canvas.create_oval(
+                y, x, y + 2, x + 2,    # slightly larger so it's visible
+                fill="lime", outline="", tags="roi_contour"
+            )
 
     def _on_image_click(self, event):
         self.current_x = event.x
@@ -302,26 +384,67 @@ class CurvesROIPage(ctk.CTkFrame):
             tags="pre_roi"
         )
     
-    # placeholder curve generator
-    def update_pre_curve(self, roi):
-        # first curve block
-        block = self.right.winfo_children()[0]
+    # Pre curve generator
+    def update_pre_curve(self, filled_coords, image_shape):
+        vol = getattr(self.state, "ctp_volume", None)
+        if not vol:
+            return
 
-        block.points = []
+        pixels = vol["pixels"]        # (T, Z, H, W)
+        T, Z, H, W = pixels.shape
+        z_idx = min(max(0, int(self.var_ctp_slice.get()) - 1), Z - 1)
 
-        times = np.arange(0, 11)
+        # build mask from filled region coords
+        mask = np.zeros(image_shape, dtype=bool)
+        rows = np.clip(filled_coords[:, 0], 0, image_shape[0] - 1)
+        cols = np.clip(filled_coords[:, 1], 0, image_shape[1] - 1)
+        mask[rows, cols] = True
 
-        baseline = 40
-        peak = 250
-        peak_time = 4
+        if not mask.any():
+            print("Mask is empty — no pixels to sample")
+            return
 
-        values = baseline + peak * np.exp(-(times - peak_time) ** 2 / 4)
+        # use real time values from volume if available
+        vol_times = vol.get("times", None)
+        if vol_times and len(vol_times) == T:
+            times = np.array(vol_times, dtype=float)
+            if len(times) > 1 and times[1] >= 500:
+                times = times / 1000.0
+        else:
+            times = np.arange(T, dtype=float)
+
+        values = np.array([
+            float(np.mean(pixels[t, z_idx][mask])) for t in range(T)
+        ])
 
         if self.var_height_positive.get():
             values = np.abs(values)
 
-        for t, v in zip(times, values):
-            block.points.append((float(t), float(v)))
+        block = self.pre_lesion_block
+        block.points = [(float(t), float(v)) for t, v in zip(times, values)]
+        block.fitted_time = None
+        block.fitted_curve = None
+
+        # rescale axes to fit actual data
+        ax = block.ax
+        ax.set_xlim(float(times[0]) - 0.5, float(times[-1]) + 0.5)
+        y_min, y_max = float(values.min()), float(values.max())
+        pad = max(1.0, (y_max - y_min) * 0.15)
+        ax.set_ylim(y_min - pad, y_max + pad)
+
+        # update range sliders to span full time range
+        t_start = int(round(float(times[0])))
+        t_end   = int(round(float(times[-1])))
+        block.range_start = t_start
+        block.range_end   = t_end
+        block.var_start.set(t_start)
+        block.var_end.set(t_end)
+        block.s_start.configure(from_=t_start, to=max(t_start+1, t_end),
+                                number_of_steps=max(1, T - 1))
+        block.s_end.configure(from_=t_start, to=max(t_start+1, t_end),
+                            number_of_steps=max(1, T - 1))
+        block.start_line.set_xdata([t_start, t_start])
+        block.end_line.set_xdata([t_end, t_end])
 
         self._redraw_curve(block)
 
@@ -345,37 +468,118 @@ class CurvesROIPage(ctk.CTkFrame):
         self.state.ctp_length = float(self.var_len.get())
         self.state.ctp_width = float(self.var_wid.get())
 
+    def _render_ctp_image(self):
+        vol = getattr(self.state, "ctp_volume", None)
+        if not vol:
+            self.lbl_ctp_source.configure(text="No CTP loaded")
+            return
+
+        pixels = vol["pixels"]   # (T, Z, H, W)
+        T, Z, H, W = pixels.shape
+
+        # clamp vars BEFORE reconfiguring sliders to avoid ZeroDivisionError
+        self.var_ctp_slice.set(min(max(1, int(self.var_ctp_slice.get())), Z))
+        self.var_ctp_time.set(min(max(1, int(self.var_ctp_time.get())), T))
+
+        self.slider_ctp_slice.configure(from_=1, to=max(2, Z), number_of_steps=max(1, Z - 1))
+        self.slider_ctp_time.configure(from_=1, to=max(2, T), number_of_steps=max(1, T - 1))
+
+        t_idx = int(self.var_ctp_time.get()) - 1
+        z_idx = int(self.var_ctp_slice.get()) - 1
+
+        img = pixels[t_idx, z_idx]
+
+        img8 = self._to_uint8(img,
+                            length=float(getattr(self.state, "ctp_length", 0.5)),
+                            width=float(getattr(self.state, "ctp_width", 0.5)))
+
+        cw = max(10, self.img_canvas.winfo_width())
+        ch = max(10, self.img_canvas.winfo_height())
+
+        from PIL import Image, ImageTk
+        pil = Image.fromarray(img8).resize((cw, ch))
+        photo = ImageTk.PhotoImage(pil)
+        self._ctp_photo = photo
+
+        self.img_canvas.delete("all")
+        self.img_canvas.create_image(cw // 2, ch // 2, image=photo, anchor="center")
+        self.lbl_ctp_source.configure(text="")
+
+        if self._last_contour_coords is not None:
+            self.draw_contour(self._last_contour_coords)
+
+    def _to_uint8(self, img: np.ndarray, length: float, width: float) -> np.ndarray:
+        lo = np.percentile(img, 1)
+        hi = np.percentile(img, 99)
+        if hi <= lo:
+            hi = lo + 1.0
+        w_scale = 0.25 + width * 1.75
+        center = (lo + hi) / 2.0 + (length - 0.5) * (hi - lo) * 0.5
+        span = (hi - lo) * w_scale
+        out = np.clip((img - (center - span / 2)) / span, 0, 1)
+        return (out * 255).astype(np.uint8)
+    
+
     def _on_ctp_slice_change(self, _=None):
         self.lbl_ctp_slice_val.configure(text=str(int(self.var_ctp_slice.get())))
         self.state.ctp_slice = int(self.var_ctp_slice.get())
+        self._render_ctp_image()        
+
 
     def _on_ctp_time_change(self, _=None):
         self.lbl_ctp_time_val.configure(text=str(int(self.var_ctp_time.get())))
         self.state.ctp_time = int(self.var_ctp_time.get())
+        self._render_ctp_image()
         
     def _on_set_pre_lesion(self):
         if self.current_x is None or self.current_y is None:
             return
 
-        size = int(self.var_sample_roi.get().split("x")[0].strip())
+        vol = getattr(self.state, "ctp_volume", None)
+        if not vol:
+            return
 
-        class FakeROI:
-            def __init__(self, x, y, z, size):
-                self.x = x
-                self.y = y
-                self.z = z
-                self.size = size
+        pixels = vol["pixels"]
+        T, Z, H, W = pixels.shape
 
-        roi = FakeROI(
-            x=self.current_x,
-            y=self.current_y,
-            z=self.var_ctp_slice.get() - 1,
-            size=size
+        t_idx = min(max(0, int(self.var_ctp_time.get()) - 1), T - 1)
+        z_idx = min(max(0, int(self.var_ctp_slice.get()) - 1), Z - 1)
+        image = pixels[t_idx, z_idx]
+
+        search_size = int(self.var_search_roi.get().split("x")[0].strip())
+
+        result = detect_roi_contour(
+            image,
+            self.current_y,
+            self.current_x,
+            max(search_size * 20, 40)
         )
 
-        self.draw_pre_roi(roi)
-        self.update_pre_curve(roi)
+        if result is None:
+            print("No contour found — click on a brighter vessel region")
+            return
 
+        print(f"Contour: {len(result['boundary_coords'])} boundary px, "
+            f"{len(result['filled_coords'])} filled px, "
+            f"long={result['long_axis']:.1f}, short={result['short_axis']:.1f}")
+
+        # boundary for drawing, filled for sampling
+        self.draw_contour(result["boundary_coords"])
+        self.update_pre_curve(result["filled_coords"], image.shape)
+
+        self.state.pre_lesion_roi = {
+            "x": self.current_x,
+            "y": self.current_y,
+            "z": z_idx,
+            "t": t_idx,
+            "long_axis": result["long_axis"],
+            "short_axis": result["short_axis"],
+            "area": result["area"],
+            "time_series": [v for _, v in self.pre_lesion_block.points],
+        }
+
+        self._add_draggable_pre_point(self.current_x, self.current_y)
+        self._save_roi_as_json()
         
     def _on_set_post_lesion(self):
         pass
@@ -399,12 +603,15 @@ class CurvesROIPage(ctk.CTkFrame):
 
         delay = int(max(40, 250 / max(speed, 0.1)))
 
-        cur = int(self.var_ctp_slice.get())
-        nxt = cur + 1
-        if nxt > 100:
-            nxt = 1
-        self.var_ctp_slice.set(nxt)
-        self._on_ctp_slice_change()
+        vol = getattr(self.state, "ctp_volume", None)
+        max_t = 100
+        if vol:
+            max_t = vol["pixels"].shape[0]   # T dimension
+
+        cur = int(self.var_ctp_time.get())
+        nxt = cur + 1 if cur < max_t else 1
+        self.var_ctp_time.set(nxt)
+        self._on_ctp_time_change()
 
         self._movie_after_id = self.after(delay, self._movie_loop)
 
@@ -571,23 +778,32 @@ class CurvesROIPage(ctk.CTkFrame):
         block.s_end.configure(command=on_range_change)
         on_range_change()
 
+        # replace the existing return with:
+        if row == 0:
+            self.pre_lesion_block = block
+        else:
+            self.post_lesion_block = block
+
     def _redraw_curve(self, block):
         ax = block.ax
 
-        # remove old curve artists (keep the 2 range lines)
-        # ax.lines includes start/end lines + curve line(s)
-        # keep first two lines which are start_line and end_line
-        kept = [block.start_line, block.end_line]
-        ax.lines = kept
-
-        # remove old scatters
-        ax.collections.clear()
+        for line in ax.lines[:]:
+            if line not in (block.start_line, block.end_line):
+                line.remove()
+        for coll in ax.collections[:]:
+            coll.remove()
 
         if block.points:
             xs = [p[0] for p in block.points]
             ys = [p[1] for p in block.points]
-            ax.plot(xs, ys, color="white", linewidth=1)
-            ax.scatter(xs, ys, color="white", s=35)
+            ax.plot(xs, ys, color="white", linewidth=1, alpha=0.6)
+            ax.scatter(xs, ys, color="white", s=20, alpha=0.6)
+
+        # cyan fitted curve on top if available
+        fitted_t = getattr(block, "fitted_time", None)
+        fitted_c = getattr(block, "fitted_curve", None)
+        if fitted_t is not None and fitted_c is not None:
+            ax.plot(fitted_t, fitted_c, color="cyan", linewidth=2)
 
         block.canvas.draw_idle()
 
@@ -600,4 +816,80 @@ class CurvesROIPage(ctk.CTkFrame):
         block.points = []
         self._redraw_curve(block)
 
+    def _add_draggable_pre_point(self, cx, cy):
+        self.img_canvas.delete("drag_point")
+        # unbind first to prevent stacking callbacks on repeated calls
+        self.img_canvas.tag_unbind("drag_point", "<ButtonPress-1>")
+        self.img_canvas.tag_unbind("drag_point", "<B1-Motion>")
+        self.img_canvas.tag_unbind("drag_point", "<ButtonRelease-1>")
+
+        r = 6
+        self.img_canvas.create_oval(
+            cx - r, cy - r, cx + r, cy + r,
+            outline="cyan", width=2, fill="", tags="drag_point"
+        )
+        self._drag_start = None
+
+        def on_press(event):
+            self._drag_start = (event.x, event.y)
+
+        def on_drag(event):
+            self.img_canvas.delete("drag_point")
+            self.img_canvas.create_oval(
+                event.x - r, event.y - r, event.x + r, event.y + r,
+                outline="cyan", width=2, fill="", tags="drag_point"
+            )
+            self._draw_crosshair(event.x, event.y)
+
+        def on_release(event):
+            self.current_x = event.x
+            self.current_y = event.y
+            self._on_set_pre_lesion()
+
+        self.img_canvas.tag_bind("drag_point", "<ButtonPress-1>", on_press)
+        self.img_canvas.tag_bind("drag_point", "<B1-Motion>", on_drag)
+        self.img_canvas.tag_bind("drag_point", "<ButtonRelease-1>", on_release)
     
+        
+    def _save_roi_as_json(self):
+        import json, os
+        roi = getattr(self.state, "pre_lesion_roi", None)
+        if not roi:
+            return
+        # make time_series JSON-serialisable
+        safe = {k: (v.tolist() if hasattr(v, "tolist") else v)
+                for k, v in roi.items()}
+        out = os.path.join(os.path.expanduser("~"), "pre_lesion_roi.json")
+        with open(out, "w") as f:
+            json.dump(safe, f, indent=2)
+        print(f"ROI saved → {out}")
+
+    def _inject_test_volume(self):
+        """
+        Creates a fake (T=24, Z=10, H=256, W=256) volume with a
+        gamma-variate-shaped contrast bolus at a known pixel location
+        so the pre-lesion curve pipeline can be tested end-to-end.
+        """
+        T, Z, H, W = 24, 10, 256, 256
+
+        # gamma variate curve peaking around t=8
+        t = np.arange(T, dtype=float)
+        bolus = np.where(t > 4, 1.0 * (t - 4)**2.5 * np.exp(-(t - 4) / 1.5), 0.0)
+        bolus = bolus / bolus.max() * 300   # scale to 300 HU peak
+
+        pixels = np.random.normal(-50, 20, (T, Z, H, W)).astype(np.float32)
+
+        # plant a bright vessel blob at row=128, col=128, all slices
+        for t_i in range(T):
+            pixels[t_i, :, 120:136, 120:136] += float(bolus[t_i])
+
+        self.state.ctp_volume = {
+            "pixels": pixels,
+            "times": list(np.arange(T) * 2.0),   # 2s spacing → 0,2,4,...46s
+            "zs": list(range(Z)),
+            "shape": (T, Z, H, W),
+        }
+        self.state.ctp_slice = 1
+        self.state.ctp_time = 1
+        print("Test volume injected — click near centre (128, 128) of the image")
+        self._render_ctp_image()

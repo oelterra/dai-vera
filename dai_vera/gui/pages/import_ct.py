@@ -318,9 +318,9 @@ class ImportCTPage(ctk.CTkFrame):
 
         slice_slider = ctk.CTkSlider(
             slice_col,
-            from_=1,
+            from_=0,
             to=100,
-            number_of_steps=99,
+            number_of_steps=100,
             orientation="vertical",
             variable=slice_var,
             fg_color=THEME["border"],
@@ -363,9 +363,9 @@ class ImportCTPage(ctk.CTkFrame):
 
         time_slider = ctk.CTkSlider(
             bottom,
-            from_=1,
+            from_=0,
             to=100,
-            number_of_steps=99,
+            number_of_steps=100,
             variable=time_var,
             fg_color=THEME["border"],
             progress_color=THEME["accent"],
@@ -744,7 +744,7 @@ class ImportCTPage(ctk.CTkFrame):
         time_slider = self._view[kind]["time_slider"]
 
         if slice_slider is not None:
-            slice_slider.configure(from_=1, to=max(1, Z), number_of_steps=max(1, Z - 1))
+            slice_slider.configure(from_=0, to=max(1, Z), number_of_steps=max(1, Z - 1))
             if kind == "CTP":
                 self.ctp_slice_index.set(min(max(1, int(self.ctp_slice_index.get())), Z))
                 self.state.ctp_slice = int(self.ctp_slice_index.get())
@@ -753,7 +753,7 @@ class ImportCTPage(ctk.CTkFrame):
                 self.state.cta_slice = int(self.cta_slice_index.get())
 
         if time_slider is not None:
-            time_slider.configure(from_=1, to=max(1, T), number_of_steps=max(1, T - 1))
+            time_slider.configure(from_=0, to=max(1, T), number_of_steps=max(1, T - 1))
             if kind == "CTP":
                 self.ctp_time_index.set(min(max(1, int(self.ctp_time_index.get())), T))
                 self.state.ctp_time = int(self.ctp_time_index.get())

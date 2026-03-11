@@ -54,7 +54,7 @@ class AppState:
         x = int(np.clip(x, 0, self.ctp_image_4d.shape[3] - 1))
 
         # Extract time–intensity curve
-        curve = self.ctp_image_4d[z, :, y, x]
+        curve = self.ctp_image_4d[:, z, y, x]
 
         # Placeholder segmentation (replace later)
         radius_px = 2
