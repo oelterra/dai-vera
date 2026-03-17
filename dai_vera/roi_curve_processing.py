@@ -101,10 +101,11 @@ def preprocess_curve(
     if baseline_override is not None and baseline_override > 0:
         # User specified: baseline_override is COUNT of baseline points
         # e.g., 2 means points 1-2 (indices 0-1)
-        baseline_position_0based = baseline_override - 1
+        baseline_position_0based = int(baseline_override) - 1
     else:
         # Auto-detect
-        baseline_position_0based = find_baseline(raw_tdc)
+        baseline_position_0based = _get_baseline_from_delta_diff(raw_tdc)
+
     
     # Ensure we have at least 1 baseline point
     baseline_position_0based = max(0, min(baseline_position_0based, len(raw_tdc) - 1))
@@ -118,6 +119,7 @@ def preprocess_curve(
     
     # Subtract baseline from entire curve
     subtracted_curve = raw_tdc - baseline_value
+    subtracted_curve = np.maximum(subtracted_curve, 0)
     
     # ─────────────────────────────────────────────────────────────────
     # 3. Determine recirculation start (how many points to fit)
@@ -126,6 +128,7 @@ def preprocess_curve(
         # washout_point is 1-based INDEX of last point to fit
         # e.g., 8 means fit points 1-8 (indices 0-7)
         recirculation_start = int(washout_point)
+
     else:
         # Use all points
         recirculation_start = len(raw_tdc)
@@ -134,12 +137,14 @@ def preprocess_curve(
     recirculation_start = min(recirculation_start, len(raw_tdc))
     
     return {
-        'subtracted_curve': subtracted_curve,
-        'baseline_position': baseline_position_0based,
-        'baseline_value': baseline_value,
-        'recirculation_start': recirculation_start,
-        'raw_curve': raw_tdc,
-    }
+    'subtracted_curve': subtracted_curve,
+    'baseline_position': baseline_position_0based,
+    'baseline_value': baseline_value,
+    'recirculation_start': recirculation_start,
+    'truncated_curve': subtracted_curve[:recirculation_start],
+    'truncated_time': time_points[:recirculation_start],
+    'raw_curve': raw_tdc,
+}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -220,57 +225,57 @@ if __name__ == "__main__":
 # # Active method: getBaseLineFromDeltaDiff
 # # ---------------------------------------------------------------------------
 
-# def _get_baseline_from_delta_diff(tdc: np.ndarray) -> int:
-#     """
-#     Slides a 3-point window through the curve.
-#     Baseline = startingIndex when tdc[end] - tdc[start] >= 50 HU.
-#     Falls back to 15% of curve length if threshold never reached.
+def _get_baseline_from_delta_diff(tdc: np.ndarray) -> int:
+    """
+    Slides a 3-point window through the curve.
+    Baseline = startingIndex when tdc[end] - tdc[start] >= 50 HU.
+    Falls back to 15% of curve length if threshold never reached.
 
-#     MATLAB is 1-based; all arithmetic below is converted to 0-based.
+    MATLAB is 1-based; all arithmetic below is converted to 0-based.
 
-#     MATLAB logic:
-#         startingIndex = 1, endingIndex = 3  (1-based)
-#         while true
-#             if tdc(endingIndex) - tdc(startingIndex) >= 50  → baseline = startingIndex
-#             else  startingIndex++, endingIndex++
-#             if endingIndex == lengthOfTDC  → break
-#         if condition: baseline = startingIndex
-#         else:         baseline = ceil(length * 15/100)
-#     """
-#     n = len(tdc)
+    MATLAB logic:
+        startingIndex = 1, endingIndex = 3  (1-based)
+        while true
+            if tdc(endingIndex) - tdc(startingIndex) >= 50  → baseline = startingIndex
+            else  startingIndex++, endingIndex++
+            if endingIndex == lengthOfTDC  → break
+        if condition: baseline = startingIndex
+        else:         baseline = ceil(length * 15/100)
+    """
+    n = len(tdc)
 
-#     if n < 3:
-#         return 0
+    if n < 3:
+        return 0
 
-#     if n == 3:
-#         # MATLAB sets startingIndex=1, endingIndex=3 but never enters the
-#         # while-loop (condition stays false), so falls through to the
-#         # 15% fallback.
-#         return int(np.ceil(n * 15 / 100)) - 1   # convert to 0-based
+    if n == 3:
+        # MATLAB sets startingIndex=1, endingIndex=3 but never enters the
+        # while-loop (condition stays false), so falls through to the
+        # 15% fallback.
+        return int(np.ceil(n * 15 / 100)) - 1   # convert to 0-based
 
-#     # n > 3: sliding window
-#     # MATLAB startingIndex / endingIndex are 1-based → subtract 1 here
-#     start = 0   # MATLAB startingIndex = 1  → 0-based = 0
-#     end   = 2   # MATLAB endingIndex   = 3  → 0-based = 2
-#     condition = False
+    # n > 3: sliding window
+    # MATLAB startingIndex / endingIndex are 1-based → subtract 1 here
+    start = 0   # MATLAB startingIndex = 1  → 0-based = 0
+    end   = 2   # MATLAB endingIndex   = 3  → 0-based = 2
+    condition = False
 
-#     while True:
-#         if tdc[end] - tdc[start] >= 50:
-#             condition = True
-#             break
-#         else:
-#             start += 1
-#             end   += 1
+    while True:
+        if tdc[end] - tdc[start] >= 50:
+            condition = True
+            break
+        else:
+            start += 1
+            end   += 1
 
-#         # MATLAB: if endingIndex == lengthOfTDC → break
-#         if end == n - 1:   # 0-based equivalent of endingIndex == lengthOfTDC
-#             break
+        # MATLAB: if endingIndex == lengthOfTDC → break
+        if end == n - 1:   # 0-based equivalent of endingIndex == lengthOfTDC
+            break
 
-#     if condition:
-#         return start          # 0-based
-#     else:
-#         # MATLAB: ceil(lengthOfTDC * 15 / 100)  → 1-based, convert to 0-based
-#         return int(np.ceil(n * 15 / 100)) - 1
+    if condition:
+        return start          # 0-based
+    else:
+        # MATLAB: ceil(lengthOfTDC * 15 / 100)  → 1-based, convert to 0-based
+        return int(np.ceil(n * 15 / 100)) - 1
 
 
 # # ---------------------------------------------------------------------------

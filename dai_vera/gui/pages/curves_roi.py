@@ -18,6 +18,7 @@ from customtkinter import CTkButton
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from PIL import Image, ImageTk
+from scipy.interpolate import interp1d 
 
 from dai_vera.gui.theme import THEME, FONTS
 
@@ -28,12 +29,14 @@ from dai_vera.drawlesioncurves import (
     get_fitted_curve,
     plot_sampled_curve,
     plot_fitted_overlay,
+    get_fitted_curve_safe
 )
 from dai_vera.roi_json import save_roi_as_json
 
 # window_to_uint8 and make_test_volume still live in curves_roi_logic
 # (it was never moved out — keep importing from there)
 from dai_vera.curves_roi_logic import window_to_uint8, make_test_volume
+# from drawlesioncurves import get_fitted_curve_safe
 
 LesionType = Literal["pre", "post"]
 _SEGMENTATION_WINDOW = 25   # matches MATLAB segmentationWindowSize
@@ -90,7 +93,7 @@ class CurvesROIPage(ctk.CTkFrame):
 
         # ── deferred init ─────────────────────────────────────────────────────
         self.after(80,  self._render_ctp_image)
-        self.after(100, self._inject_test_volume)
+        # self.after(100, self._inject_test_volume)
 
     
 
@@ -920,54 +923,122 @@ class CurvesROIPage(ctk.CTkFrame):
         self.img_canvas.create_image(cw // 2, ch // 2, image=photo, anchor="center")
 
     # =========================================================================
-    # New: Fit Curve
+    # Fit Curve
+    # =========================================================================
+
+    # def _on_fit_curve(self, block) -> None:
+    #     if not block.times:
+    #         print(f"[{block.lesion}] Set lesion first")
+    #         return
+        
+    #     # print(f"\n=== DEBUG block.values ===")
+    #     # print(f"block.values: {block.values[:10] if len(block.values) >= 10 else block.values}")
+    #     # print(f"  min={np.min(block.values):.1f}, max={np.max(block.values):.1f}")
+    #     # print(f"  mean={np.mean(block.values):.1f}")
+    #     # print(f"========================\n")
+
+    #     try:
+    #         baseline = int(block.var_baseline.get())
+    #         washout = int(block.var_washout.get())
+    #     except (ValueError, AttributeError):
+    #         baseline, washout = 0, 0
+
+    #     try:
+    #     # Call the safe curve fitting function
+    #         result = get_fitted_curve_safe(
+    #             sample_curve=np.asarray(block.values, dtype=float),
+    #             sample_time=np.asarray(block.times, dtype=float),
+    #             baseline=baseline,
+    #             washout=washout,
+    #         )
+
+    #         # Interpolate to smooth curve
+    #         if len(result.fitted_time) > 2:
+    #             from scipy.interpolate import interp1d
+    #             f = interp1d(result.fitted_time, result.fitted_curve, kind='cubic')
+    #             smooth_time = np.linspace(result.fitted_time[0], result.fitted_time[-1], 200)
+    #             smooth_curve = f(smooth_time)
+    #         else:
+    #             smooth_time = result.fitted_time
+    #             smooth_curve = result.fitted_curve
+
+    #         plot_fitted_overlay(
+    #             ax=block.ax,
+    #             fitted_time=smooth_time,
+    #             fitted_curve=smooth_curve,
+    #             lesion_type=block.lesion,
+    #         )
+    #     except Exception as exc:
+    #         print(f"[{block.lesion}] Fit failed: {exc}")
+    #         return
+
+    #     # Log fitted parameters
+    #     print(f"[{block.lesion}] K={result.k:.3f}, alpha={result.alpha:.3f}, "
+    #         f"beta={result.beta:.3f}, RMSE={result.rmse:.3f}, "
+    #         f"converged={result.converged}")
+
+    #     # Plot the result
+    #     try:
+    #         plot_fitted_overlay(
+    #             ax=block.ax,
+    #             fitted_time=result.fitted_time,
+    #             fitted_curve=result.fitted_curve,
+    #             lesion_type=block.lesion,
+    #             # fit_error=result.rmse  # Optional: display RMSE in legend
+                
+    #         )
+    #         block.canvas.draw()
+    #     except Exception as exc:
+    #         print(f"[{block.lesion}] Plotting failed: {exc}")
+
+    # =========================================================================
+    # Fitting handler
     # =========================================================================
 
     def _on_fit_curve(self, block) -> None:
-        if not block.times:
-            print(f"[{block.lesion}] Set lesion first")
+        """
+        Uses get_fitted_curve_safe to calculate the gamma-variate fit 
+        and overlays it on the existing sampled dots.
+        """
+        if not block.times or len(block.times) < 4:
+            print("Not enough points to fit a curve.")
             return
+
+        try:
+            # 1. Parse manual baseline/washout inputs from the UI entry boxes
         
-        print(f"\n=== DEBUG block.values ===")
-        print(f"block.values: {block.values[:10] if len(block.values) >= 10 else block.values}")
-        print(f"  min={np.min(block.values):.1f}, max={np.max(block.values):.1f}")
-        print(f"  mean={np.mean(block.values):.1f}")
-        print(f"========================\n")
+            try:
+                b_val = int(float(block.var_baseline.get() or 0))
+                w_val = int(float(block.var_washout.get() or 0))
+            except ValueError:      # This handles non-numeric text in the boxes
+                b_val = 0
+                w_val = 0
 
-
-        try:
-            # Ensure we are getting the text from the Entry widgets
-            baseline = int(block.var_baseline.get())
-            washout = int(block.var_washout.get())
-        except ValueError:
-            baseline, washout = 0, 0
-
-
-        try:
-            # CALLING THE MATH ENGINE
-            result = get_fitted_curve(
-                sample_curve = np.asarray(block.values, dtype=float),
-                sample_time  = np.asarray(block.times,  dtype=float),
-                baseline     = baseline,
-                washout      = washout,
+            # 2. Call the SAFE version of the fitting logic
+            # We removed 'crop_range' as it is handled by baseline/washout indices
+            result = get_fitted_curve_safe(
+                sample_curve=np.array(block.values),
+                sample_time=np.array(block.times),
+                baseline=b_val,
+                washout=w_val
             )
-        except Exception as exc:
-            print(f"[{block.lesion}] Fit failed: {exc}")
-            return
 
-        # Log for debugging - check if K is still tiny here
-        print(f"[{block.lesion}] K={result.k:.3f} RMSE={result.rmse:.3f}")
+            # 3. Overlay the fitted line on the plot
+            # This uses the specific 'pre' or 'post' color scheme
+            plot_fitted_overlay(
+                ax=block.ax,
+                fitted_time=result.fitted_time,
+                fitted_curve=result.fitted_curve,
+                lesion_type=block.lesion
+            )
 
-        # PLOTTING THE RESULT
-        plot_fitted_overlay(
-            ax           = block.ax,
-            fitted_time  = result.fitted_time,
-            fitted_curve = result.fitted_curve,
-            lesion_type  = block.lesion,
-            # fit_error    = result.rmse # This shows the accuracy in the legend
-        )
+            # 4. Update the UI with the results (optional: print to console for debug)
+            print(f"Fit Results [{block.lesion}]: RMSE={result.rmse:.2f}, AUC={result.auc:.2f}")
+            if not result.converged:
+                print("Warning: Gamma fit did not converge. Using fallback interpolation.")
 
-        block.canvas.draw()
+        except Exception as e:
+            print(f"Fitting error: {e}")
 
     # =========================================================================
     # New: Plot click → select point / Edit / Remove

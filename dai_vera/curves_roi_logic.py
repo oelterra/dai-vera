@@ -261,11 +261,13 @@ def make_test_volume(
     dict with keys: pixels (T,Z,H,W), times, zs, shape
     """
     t = np.arange(T, dtype=float)
-    bolus = np.where(t > 4, 1.0 * (t - 4) ** 2.5 * np.exp(-(t - 4) / 1.5), 0.0)
+    t_shift = t - 4
+    t_shift = np.maximum(t_shift, 0)
+
+    bolus = 1.0 * (t_shift ** 2.5) * np.exp(-t_shift / 1.5)
     bolus = bolus / bolus.max() * 300  # 300 HU peak
 
     pixels = np.random.normal(-50, 20, (T, Z, H, W)).astype(np.float32)
-
     for t_i in range(T):
         pixels[t_i, :, 120:136, 120:136] += float(bolus[t_i])
 

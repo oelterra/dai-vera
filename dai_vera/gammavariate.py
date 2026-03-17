@@ -51,56 +51,61 @@ class GammaVariateFitResult:
     converged:            bool = True
 
 
+
 # ---------------------------------------------------------------------------
 # Modified gamma variate model
 # ---------------------------------------------------------------------------
 
-def _mgv(time, K, alpha, beta, t_at_value):
-    """
-    Strict translation of MATLAB's inner mgv(initialParameters, time)
-    """
-    tAT = time - t_at_value
-    tAT = np.where(tAT < 0, 0, tAT) # Clamp negative to 0
-    
-    # MATLAB: ct(i) = K * tATalpha(i) * tATexp(i)
-    # We use np.clip to prevent overflow errors in exp during optimization
-    exponent = -tAT / max(beta, 1e-6)
-    return K * (tAT**alpha) * np.exp(np.clip(exponent, -100, 100))
+def _mgv(t, K, alpha, beta, t_at):
+    t = np.asarray(t, dtype=float)
 
+    # Shift time
+    tAT = t - t_at
 
+    # Clamp BEFORE power (CRITICAL)
+    tAT = np.maximum(tAT, 0)
+
+    # Safe computation
+    with np.errstate(invalid='ignore'):
+        y = K * (tAT ** alpha) * np.exp(-tAT / beta)
+
+    # Replace NaNs just in case
+    y = np.nan_to_num(y)
+
+    return y
 # ---------------------------------------------------------------------------
 # Peak-boost loop  (MATLAB while loop)
 # ---------------------------------------------------------------------------
 
-def _boost_to_peak(
-    params: np.ndarray,
-    stretched_time: np.ndarray,
-    t_at: float,
-    peak_data: float,
-    thresh: float = 5.0,
-) -> np.ndarray:
-    """
-    If the fitted peak undershoots the data peak by more than `thresh` HU,
-    iteratively scale K upward until it catches up.
+# def _boost_to_peak(
+#     params: np.ndarray,
+#     stretched_time: np.ndarray,
+#     t_at: float,
+#     peak_data: float,
+#     thresh: float = 5.0,
+# ) -> np.ndarray:
+#     """
+#     If the fitted peak undershoots the data peak by more than `thresh` HU,
+#     iteratively scale K upward until it catches up.
 
-    Matches MATLAB:
-        factor = 1.05
-        while peakData - peakFit > thresh:
-            K *= factor
-            factor += 0.05
-    """
-    params = params.copy()
-    fitted = _mgv(stretched_time, params[0], params[1], params[2], t_at)
-    peak_fit = float(np.max(fitted))
-    factor = 1.05
+#     Matches MATLAB:
+#         factor = 1.05
+#         while peakData - peakFit > thresh:
+#             K *= factor
+#             factor += 0.05
+#     """
+#     params = params.copy()
+#     fitted = _mgv(stretched_time, params[0], params[1], params[2], t_at)
+#     peak_fit = float(np.max(fitted))
+#     factor = 1.05
 
-    while peak_data - peak_fit > thresh:
-        params[0] *= factor
-        fitted    = _mgv(stretched_time, params[0], params[1], params[2], t_at)
-        peak_fit  = float(np.max(fitted))
-        factor   += 0.05
+#     while peak_data - peak_fit > thresh:
+#         params[0] *= factor
+#         fitted    = _mgv(stretched_time, params[0], params[1], params[2], t_at)
+#         peak_fit  = float(np.max(fitted))
+#         factor   += 0.05
 
-    return params
+#     return params
 
 
 # ---------------------------------------------------------------------------
@@ -149,83 +154,86 @@ def fit_modified_gamma_variate(
     logger.debug("fitModifiedGammaVariate: len(times)=%d, len(datas)=%d, "
                  "contrastArrivalTime=%d", len(times), len(datas), contrast_arrival_time)
 
-    # ── 2. Resolve t_AT from the 1-based contrast_arrival_time index ─────────
-    # MATLAB: tAT = time - time(contrastArrivalTime)
-    # contrastArrivalTime is 1-based → convert to 0-based
+    # 2. Get t_AT value (convert 1-based to 0-based index)
     cat_idx_0 = max(0, min(int(contrast_arrival_time) - 1, len(times) - 1))
-    t_at      = float(times[cat_idx_0])
+    t_at = float(times[cat_idx_0])  # This is the TIME VALUE, not index
+    
+    logger.debug(f"t_AT = {t_at:.4f} s (index {cat_idx_0})")
 
-    logger.debug("t_AT = %.4f s (index %d)", t_at, cat_idx_0)
-
-    # ── 3. Fit with scipy curve_fit  (≈ lsqcurvefit) ─────────────────────────
-    # Fix t_at as a constant by wrapping the model in a lambda.
+    # 3. Define model with FIXED t_at
     def model(t, K, alpha, beta):
-        # guard: beta must be > 0 to avoid division by zero
         beta = max(beta, 1e-6)
-        return _mgv(t, K, alpha, beta, t_at)
 
-    p0     = [K_init, alpha_init, beta_init]
-    # MATLAB: lowerBound=-Inf, upperBound=Inf → no bounds in scipy either
+        # Use SAME t_AT time value everywhere (matches MATLAB behavior better)
+        tAT = t - t_at
+
+        tAT = np.where(tAT < 0, 0, tAT)
+
+        tAT_safe = np.where(tAT == 0, 1e-12, tAT)
+
+        return K * (tAT_safe ** alpha) * np.exp(np.clip(-tAT / beta, -100, 100))
+    
+    # 4. Fit the model
+    p0 = [K_init, alpha_init, beta_init]
     converged = True
+    
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", OptimizeWarning)
             estimated, _ = curve_fit(
                 model, times, datas,
                 p0=p0,
+                bounds=([0, 0, 1e-6], [np.inf, 10, np.inf]),
                 maxfev=3000,
                 ftol=1e-10,
                 xtol=1e-10,
             )
     except (OptimizeWarning, RuntimeError) as exc:
-        logger.warning("curve_fit did not converge: %s — using initial params", exc)
+        logger.warning(f"curve_fit did not converge: {exc}")
         estimated = np.array(p0, dtype=float)
         converged = False
 
-    logger.debug("Estimated K=%.4f  alpha=%.4f  beta=%.4f",
-                 estimated[0], estimated[1], estimated[2])
+    logger.debug(f"Estimated K={estimated[0]:.4f}, alpha={estimated[1]:.4f}, beta={estimated[2]:.4f}")
 
-    # ── 4. Build stretched (dense) time axis ──────────────────────────────────
-    # MATLAB: stretchedTime = linspace(time(1), time(end))  → 100 points
+    # 5. Build stretched time axis
     stretched_time = np.linspace(float(time[0]), float(time[-1]), 100)
-
-    # ── 5. Find closest index in stretched_time to t_AT ──────────────────────
-    # MATLAB: absoluteDifferenceValues = abs(stretchedTime - time(contrastArrivalTime))
-    #         closestIndex = find(abs == min(abs))  → take first if multiple
+    
+    # 6. Find closest index to t_AT in stretched_time
     abs_diff = np.abs(stretched_time - t_at)
-    closest_idx = int(np.argmin(abs_diff))   # already 0-based
-
-    # update t_at to the exact value on the stretched grid
+    closest_idx = int(np.argmin(abs_diff))
     t_at_stretched = float(stretched_time[closest_idx])
 
-    # ── 6. Compute fitted curve on stretched time ─────────────────────────────
-    fitted_data = _mgv(stretched_time, estimated[0], estimated[1], estimated[2],
-                       t_at_stretched)
+    # 7. Compute fitted curve on stretched time
+    fitted_data = model(stretched_time, estimated[0], estimated[1], estimated[2])
 
-    # ── 7. Peak-boost loop ────────────────────────────────────────────────────
-    peak_data    = float(np.max(data))
-    estimated    = _boost_to_peak(estimated, stretched_time, t_at_stretched, peak_data)
-    fitted_data  = _mgv(stretched_time, estimated[0], estimated[1], estimated[2],
-                        t_at_stretched)
+    # 8. Peak-boost loop
+    peak_data = float(np.max(data))  # Use ORIGINAL data, not truncated
+    peak_fit = float(np.max(fitted_data))
+    thresh = 5.0
+    factor = 1.05
     
-    # We calculate what the curve would be AT the original sample points
-    fitted_at_samples = _mgv(time, estimated[0], estimated[1], estimated[2], t_at)
-    # Sum of absolute differences between raw data and the fit
+    while peak_data - peak_fit > thresh:
+        estimated[0] *= factor
+        fitted_data = model(stretched_time, estimated[0], estimated[1], estimated[2])
+        peak_fit = float(np.max(fitted_data))
+        factor += 0.05
+
+    logger.debug(f"Final K={estimated[0]:.4f}, alpha={estimated[1]:.4f}, beta={estimated[2]:.4f}")
+
+    # 9. Calculate abs_diff_sum on ORIGINAL sample times
+    fitted_at_samples = model(time, estimated[0], estimated[1], estimated[2])
     abs_diff_sum = float(np.sum(np.abs(data - fitted_at_samples)))
 
-    logger.debug("Final K=%.4f  alpha=%.4f  beta=%.4f", *estimated)
-
     return GammaVariateFitResult(
-        fitted_data          = fitted_data,
-        stretched_time       = stretched_time,
-        k                    = float(estimated[0]),
-        alpha                = float(estimated[1]),
-        beta                 = float(estimated[2]),
-        contrast_arrival_idx = closest_idx,
-        abs_diff_sum         = abs_diff_sum, # <--- Return this to the UI
-        converged            = converged,
+        fitted_data=fitted_data,
+        stretched_time=stretched_time,
+        k=float(estimated[0]),
+        alpha=float(estimated[1]),
+        beta=float(estimated[2]),
+        contrast_arrival_idx=closest_idx,
+        abs_diff_sum=abs_diff_sum,
+        converged=converged,
     )
-
 
 # ---------------------------------------------------------------------------
 # AUC helper

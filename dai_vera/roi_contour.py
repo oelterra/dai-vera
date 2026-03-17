@@ -18,7 +18,7 @@ import numpy as np
 from skimage.draw import polygon
 from skimage.filters import threshold_otsu
 from skimage.measure import label, regionprops
-from skimage.morphology import binary_erosion
+from skimage.morphology import erosion
 from scipy.ndimage import binary_fill_holes
 from skimage.measure import find_contours
 from scipy.spatial.distance import pdist
@@ -139,7 +139,8 @@ def get_long_and_short_axis(binary_image: np.ndarray) -> tuple[float, float]:
     if labeled.max() == 0:
         return 0.0, 0.0
     props = regionprops(labeled)[0]
-    return props.major_axis_length, props.minor_axis_length
+    # return props.major_axis_length, props.minor_axis_length
+    return props.axis_major_length, props.axis_minor_length
 
 # equivalent of bwferet in matlab bwferet(binaryImage, 'Max/MinFeretProperties')
 def bwferet(binary_image: np.ndarray) -> tuple[float, float]:
@@ -267,7 +268,7 @@ def get_contour_indices(
     filled_mask[largest.coords[:,0], largest.coords[:,1]] = True
 
     # 4. Compute boundary: filled minus eroded
-    eroded = binary_erosion(filled_mask)
+    eroded = erosion(filled_mask)
     boundary_mask = filled_mask & ~eroded
 
     # 5. Map local coords back to full image

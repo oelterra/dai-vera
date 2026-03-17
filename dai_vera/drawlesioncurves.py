@@ -225,6 +225,116 @@ class FittedCurveResult:
     converged:                  bool = True
 
 
+import numpy as np
+from dataclasses import dataclass
+
+@dataclass
+class FittedCurveResult:
+    fitted_curve:               np.ndarray
+    fitted_time:                np.ndarray
+    baseline_subtracted_curve:  np.ndarray
+    rmse:                       float
+    k:                          float
+    alpha:                      float
+    beta:                       float
+    baseline_position:          int
+    recirculation_start:        int
+    auc:                        float
+    converged:                  bool = True
+
+
+def get_fitted_curve_safe(
+    sample_curve: np.ndarray,
+    sample_time: np.ndarray,
+    baseline: int = 0,
+    washout: int = 0,
+) -> FittedCurveResult:
+    """
+    Fit a gamma-variate curve, or fallback to smooth interpolation
+    if gamma fit fails or produces negligible curve values.
+    """
+    from dai_vera.roi_curve_processing import preprocess_curve, find_baseline
+    from dai_vera.gammavariate import fit_modified_gamma_variate, compute_auc
+
+    sample_curve = np.asarray(sample_curve, dtype=float).flatten()
+    sample_time  = np.asarray(sample_time, dtype=float).flatten()
+
+    # Convert ms → s if needed
+    if len(sample_time) > 1 and sample_time[1] >= 500:
+        sample_time = sample_time / 1000.0
+
+    # baseline
+    position = baseline if baseline != 0 else find_baseline(sample_curve) + 1
+    position = max(1, position)
+
+    processed = preprocess_curve(
+        raw_tdc           = sample_curve,
+        time_points       = sample_time,
+        washout_point     = washout if washout != 0 else None,
+        baseline_override = position,
+    )
+
+    baseline_subtracted = processed["subtracted_curve"]
+    baseline_pos_0      = processed["baseline_position"]
+    recirc_start        = processed["recirculation_start"]
+
+    # initial gamma parameters
+    peak_value = float(np.max(baseline_subtracted))
+    K_init = max(peak_value, 1.0)
+    alpha_init = 2.0
+    t_peak = float(sample_time[np.argmax(baseline_subtracted)])
+    t_at = float(sample_time[max(0, position-1)])
+    beta_init = max((t_peak - t_at) / (alpha_init + 1.0), 0.5)
+
+    # Try gamma fit
+    converged = True
+    try:
+        fit = fit_modified_gamma_variate(
+            time                   = sample_time,
+            data                   = baseline_subtracted,
+            K_init                 = K_init,
+            alpha_init             = alpha_init,
+            beta_init              = beta_init,
+            num_points_to_consider = recirc_start,
+            contrast_arrival_time  = position,
+        )
+        baseline_hu_offset = processed.get("baseline_value", 0)
+        fitted_curve = fit.fitted_data + baseline_hu_offset
+        fitted_time = fit.stretched_time
+
+        # Check for negligible curve
+        if np.all(np.abs(fitted_curve) < 1e-2):
+            raise RuntimeError("Gamma fit produced near-zero curve")        
+        
+    except Exception:
+        # Fallback: smooth interpolation over start → end points
+        print("Gamma fit failed, using smooth interpolation fallback")
+        start_time = sample_time[position-1]
+        end_time   = sample_time[washout-1] if washout != 0 else sample_time[-1]
+        mask = (sample_time >= start_time) & (sample_time <= end_time)
+        fitted_time = np.linspace(start_time, end_time, 100)
+        fitted_curve = np.interp(fitted_time, sample_time[mask], sample_curve[mask])        
+        
+        converged = False
+        K_init = alpha_init = beta_init = 0.0
+
+    rmse = float(np.sqrt(np.mean((fitted_curve - np.interp(fitted_time, sample_time, baseline_subtracted))**2)))
+    auc  = compute_auc(fitted_curve, fitted_time)
+
+    return FittedCurveResult(
+        fitted_curve              = fitted_curve,
+        fitted_time               = fitted_time,
+        baseline_subtracted_curve = baseline_subtracted,
+        rmse                      = rmse,
+        k                         = K_init,
+        alpha                     = alpha_init,
+        beta                      = beta_init,
+        baseline_position         = baseline_pos_0,
+        recirculation_start       = recirc_start,
+        auc                       = auc,
+        converged                 = converged,
+    )
+
 def get_fitted_curve(
     sample_curve:   np.ndarray,
     sample_time:    np.ndarray,
