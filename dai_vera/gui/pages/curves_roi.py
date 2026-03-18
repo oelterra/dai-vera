@@ -433,14 +433,38 @@ class CurvesROIPage(ctk.CTkFrame):
         block.s_end.grid(row=0, column=3, sticky="ew", padx=(8, 0))
 
         def on_range_change(_=None, b=block):
-            a = int(b.var_start.get())
-            z = int(b.var_end.get())
-            if a > z:
-                a, z = z, a
-                b.var_start.set(a)
-                b.var_end.set(z)
-            b.start_line.set_xdata([a, a])
-            b.end_line.set_xdata([z, z])
+            if not b.times:
+                return
+
+            start_val = int(b.var_start.get())
+            end_val   = int(b.var_end.get())
+
+            if start_val > end_val:
+                start_val, end_val = end_val, start_val
+                b.var_start.set(start_val)
+                b.var_end.set(end_val)
+
+            # Move vertical lines
+            b.start_line.set_xdata([start_val, start_val])
+            b.end_line.set_xdata([end_val, end_val])
+
+            # Filter data within selected time range
+            times = np.array(b.times)
+            values = np.array(b.values)
+
+            mask = (times >= start_val) & (times <= end_val)
+
+            if np.any(mask):
+                t_filtered = times[mask]
+                v_filtered = values[mask]
+
+                # Update axis limits to selected region
+                b.ax.set_xlim(min(b.times), max(b.times))
+
+                vmin, vmax = np.min(v_filtered), np.max(v_filtered)
+                pad = max(1.0, (vmax - vmin) * 0.15)
+                b.ax.set_ylim(vmin - pad, vmax + pad)
+
             b.canvas.draw_idle()
 
         block.s_start.configure(command=on_range_change)
@@ -679,14 +703,34 @@ class CurvesROIPage(ctk.CTkFrame):
         pad = max(1.0, (v_max - v_min) * 0.15)
         ax.set_ylim(v_min - pad, v_max + pad)
 
-        t_start = int(round(times[0]))
-        t_end   = int(round(times[-1]))
-        n_steps = max(1, len(times) - 1)
+        # Get clean integer timepoints
+        times_arr = np.array(times)
+        # unique_times = np.unique(np.round(times_arr).astype(int))
 
-        block.var_start.set(t_start)
-        block.var_end.set(t_end)
-        block.s_start.configure(from_=t_start, to=max(t_start + 1, t_end), number_of_steps=n_steps)
-        block.s_end.configure(from_=t_start,   to=max(t_start + 1, t_end), number_of_steps=n_steps)
+        t_start = float(times_arr.min())
+        t_end   = float(times_arr.max())
+
+        n_steps = max(1, len(times_arr) - 1)
+
+        # THIS is where your line goes
+        # n_steps = max(1, len(unique_times) - 1)
+
+        # Set slider values
+        block.var_start = ctk.DoubleVar(value=0.0)
+        block.var_end   = ctk.DoubleVar(value=10.0)
+
+        # Configure sliders to snap to timepoints
+        block.s_start.configure(
+            from_=t_start,
+            to=t_end,
+            number_of_steps=n_steps
+        )
+
+        block.s_end.configure(
+            from_=t_start,
+            to=t_end,
+            number_of_steps=n_steps
+        )
         block.start_line.set_xdata([t_start, t_start])
         block.end_line.set_xdata([t_end,   t_end])
 
@@ -820,6 +864,9 @@ class CurvesROIPage(ctk.CTkFrame):
             print("ERROR: sampled points are empty!")
             return
         
+        print("RAW TIMES:", time_points[:10])
+        print("INTERP TIMES:", interp_times[:10])
+        print("VALUES:", interp_vals[:10])
 
         # 2. get_contour
         contour = get_contour(
@@ -1016,12 +1063,30 @@ class CurvesROIPage(ctk.CTkFrame):
 
             # 2. Call the SAFE version of the fitting logic
             # We removed 'crop_range' as it is handled by baseline/washout indices
+            times = np.array(block.times)
+            values = np.array(block.values)
+
+            start_val = float(block.var_start.get())
+            end_val   = float(block.var_end.get())
+
+            mask = (times >= start_val) & (times <= end_val)
+
+            if np.sum(mask) < 4:
+                print("Not enough points in selected range to fit.")
+                return
+
+            times_fit = times[mask]
+            values_fit = values[mask]
+
             result = get_fitted_curve_safe(
-                sample_curve=np.array(block.values),
-                sample_time=np.array(block.times),
+                sample_curve=values_fit,
+                sample_time=times_fit,
                 baseline=b_val,
                 washout=w_val
             )
+            #     baseline=b_val,
+            #     washout=w_val
+            # )
 
             # 3. Overlay the fitted line on the plot
             # This uses the specific 'pre' or 'post' color scheme

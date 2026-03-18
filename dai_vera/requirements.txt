@@ -12,4 +12,4 @@ pyparsing==3.3.2
 python-dateutil==2.9.0.post0
 six==1.17.0
 scikit-image==0.26.0
-pydicom==26.0.1
+pydicom==3.0.1
