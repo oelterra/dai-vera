@@ -53,33 +53,29 @@ def _y_limits(curve: np.ndarray) -> tuple[float, float]:
 
 
 def _configure_axes(
-    ax: Axes,
-    times: np.ndarray,
-    curve: np.ndarray,
-    time_unit: str = "s",
+        ax: Axes,
+        times: np.ndarray,
+        curve: np.ndarray,
+        time_unit: str = "s",
 ) -> None:
-    """
-    Set axis limits, ticks, and labels to match MATLAB getWingCurve:
-        X: [0, max(time)], 10 evenly spaced integer ticks
-        Y: [minY, maxY],    5 evenly spaced integer ticks
-    """
-    t_max         = float(np.max(times)) if times.size > 0 else 10.0
-    min_y, max_y  = _y_limits(curve)
+    t_max = float(np.max(times)) if times.size > 0 else 10.0
+    min_y, max_y = _y_limits(curve)
 
     ax.set_xlim(0, t_max)
     ax.set_ylim(min_y, max_y)
 
-    # X ticks: MATLAB  0 : max/10 : max  cast to int16
-    ax.set_xticks(np.unique(np.linspace(0, t_max, 11).astype(int)))
+    # X ticks — cast to int AND set labels explicitly so no decimals ever appear
+    x_ticks = np.unique(np.linspace(0, t_max, 11).astype(int))
+    ax.set_xticks(x_ticks)
+    ax.set_xticklabels([str(int(t)) for t in x_ticks])  # ← this is the fix
 
-    # Y ticks: MATLAB  interval = (maxY + |minY|) / 5
+    # Y ticks
     interval = int((max_y + abs(min_y)) / 5)
     if interval > 0:
         ax.set_yticks(np.arange(int(min_y), int(max_y) + 1, interval))
 
     ax.set_xlabel(f"Time ({time_unit})", labelpad=8)
     ax.set_ylabel("Enhancement (HU)", labelpad=8)
-
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -298,7 +294,7 @@ def get_fitted_curve_safe(
             num_points_to_consider = recirc_start,
             contrast_arrival_time  = position,
         )
-        baseline_hu_offset = processed.get("baseline_value", 0)
+        baseline_hu_offset = float(processed.get("baseline_value", 0.0))
         fitted_curve = fit.fitted_data + baseline_hu_offset
         fitted_time = fit.stretched_time
 
@@ -318,21 +314,23 @@ def get_fitted_curve_safe(
         converged = False
         K_init = alpha_init = beta_init = 0.0
 
-    rmse = float(np.sqrt(np.mean((fitted_curve - np.interp(fitted_time, sample_time, baseline_subtracted))**2)))
-    auc  = compute_auc(fitted_curve, fitted_time)
+    rmse = float(np.sqrt(np.mean((fitted_curve - np.interp(fitted_time, sample_time, baseline_subtracted)) ** 2)))
+    auc = compute_auc(fit.fitted_data, fit.stretched_time)
+
+    baseline_hu_offset = float(processed.get("baseline_value", 0.0))
 
     return FittedCurveResult(
-        fitted_curve              = fitted_curve,
-        fitted_time               = fitted_time,
-        baseline_subtracted_curve = baseline_subtracted,
-        rmse                      = rmse,
-        k                         = K_init,
-        alpha                     = alpha_init,
-        beta                      = beta_init,
-        baseline_position         = baseline_pos_0,
-        recirculation_start       = recirc_start,
-        auc                       = auc,
-        converged                 = converged,
+        fitted_curve=fit.fitted_data + baseline_hu_offset,
+        fitted_time=fit.stretched_time,
+        baseline_subtracted_curve=baseline_subtracted,
+        rmse=rmse,
+        k=fit.k,
+        alpha=fit.alpha,
+        beta=fit.beta,
+        baseline_position=baseline_pos_0,
+        recirculation_start=recirc_start,
+        auc=auc,
+        converged=converged,
     )
 
 def get_fitted_curve(

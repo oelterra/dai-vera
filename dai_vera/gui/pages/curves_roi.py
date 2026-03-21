@@ -524,6 +524,146 @@ class CurvesROIPage(ctk.CTkFrame):
         else:
             self.post_lesion_block = block
 
+    def _build_fit_controls(self, block, fit_row_parent):
+        """
+        Build the Baseline / Washout entry row and wire them to the sliders.
+        Call this from _build_curve_block in place of the existing fit_row build.
+        """
+        fit_row = ctk.CTkFrame(fit_row_parent, fg_color="transparent")
+        fit_row.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 6))
+
+        ctk.CTkLabel(fit_row, text="Baseline", text_color=THEME["muted"],
+                     font=FONTS["small"]).pack(side="left")
+
+        block.var_baseline = ctk.StringVar(value="0")
+        baseline_entry = ctk.CTkEntry(
+            fit_row, textvariable=block.var_baseline,
+            width=52, height=28,
+            fg_color=THEME["input_bg"], border_color=THEME["border"],
+        )
+        baseline_entry.pack(side="left", padx=(6, 16))
+
+        ctk.CTkLabel(fit_row, text="Washout", text_color=THEME["muted"],
+                     font=FONTS["small"]).pack(side="left")
+
+        block.var_washout = ctk.StringVar(value="0")
+        washout_entry = ctk.CTkEntry(
+            fit_row, textvariable=block.var_washout,
+            width=52, height=28,
+            fg_color=THEME["input_bg"], border_color=THEME["border"],
+        )
+        washout_entry.pack(side="left", padx=(6, 16))
+
+        ctk.CTkButton(
+            fit_row, text="Fit Curve",
+            fg_color=THEME["accent"], hover_color=THEME["accent_2"],
+            text_color="black", height=30, corner_radius=10,
+            command=lambda b=block: self._on_fit_curve(b),
+        ).pack(side="left")
+
+        # ── Sync: Entry → Slider ──────────────────────────────────────────────
+        # When the user types a value in Baseline/Washout and presses Enter (or
+        # focus-out), push that time value into the corresponding slider.
+
+        def _entry_to_slider(entry_var, slider, block_ref, is_start: bool, event=None):
+            """Parse the entry value and move the matching slider."""
+            try:
+                t_val = float(entry_var.get())
+            except ValueError:
+                return  # ignore bad input silently
+
+            if not block_ref.times:
+                return
+
+            times = np.asarray(block_ref.times, dtype=float)
+            t_val = float(np.clip(t_val, times[0], times[-1]))
+
+            if is_start:
+                # don't let baseline go past washout
+                try:
+                    end_val = float(block_ref.var_end.get())
+                except ValueError:
+                    end_val = times[-1]
+                t_val = min(t_val, end_val)
+                block_ref.var_start.set(t_val)
+            else:
+                try:
+                    start_val = float(block_ref.var_start.get())
+                except ValueError:
+                    start_val = times[0]
+                t_val = max(t_val, start_val)
+                block_ref.var_end.set(t_val)
+
+            # update entry to clamped value
+            entry_var.set(f"{t_val:.2f}")
+
+        baseline_entry.bind(
+            "<Return>",
+            lambda e, v=block.var_baseline, s=block.s_start, b=block:
+            _entry_to_slider(v, s, b, is_start=True),
+        )
+        baseline_entry.bind(
+            "<FocusOut>",
+            lambda e, v=block.var_baseline, s=block.s_start, b=block:
+            _entry_to_slider(v, s, b, is_start=True),
+        )
+
+        washout_entry.bind(
+            "<Return>",
+            lambda e, v=block.var_washout, s=block.s_end, b=block:
+            _entry_to_slider(v, s, b, is_start=False),
+        )
+        washout_entry.bind(
+            "<FocusOut>",
+            lambda e, v=block.var_washout, s=block.s_end, b=block:
+            _entry_to_slider(v, s, b, is_start=False),
+        )
+
+        # ── Sync: Slider → Entry ──────────────────────────────────────────────
+        # When the slider moves, keep the entry text in sync.
+        # We patch the existing on_range_change command that is already set on the
+        # sliders; instead, configure the slider commands here so they update entries.
+
+        def _start_slider_moved(val, b=block):
+            """Called whenever the Start slider changes."""
+            t_val = float(val)
+            # Guard: don't let start pass end
+            try:
+                end_val = float(b.var_end.get())
+            except ValueError:
+                end_val = t_val
+            if t_val > end_val:
+                t_val = end_val
+                b.var_start.set(t_val)
+
+            b.var_baseline.set(f"{t_val:.2f}")
+
+            # update range line
+            b.start_line.set_xdata([t_val, t_val])
+            b.start_line.set_visible(True)
+            b.canvas.draw_idle()
+
+        def _end_slider_moved(val, b=block):
+            """Called whenever the End slider changes."""
+            t_val = float(val)
+            try:
+                start_val = float(b.var_start.get())
+            except ValueError:
+                start_val = t_val
+            if t_val < start_val:
+                t_val = start_val
+                b.var_end.set(t_val)
+
+            b.var_washout.set(f"{t_val:.2f}")
+
+            # update range line
+            b.end_line.set_xdata([t_val, t_val])
+            b.end_line.set_visible(True)
+            b.canvas.draw_idle()
+
+        block.s_start.configure(command=_start_slider_moved)
+        block.s_end.configure(command=_end_slider_moved)
+
     # =========================================================================
     # Rendering helpers
     # =========================================================================
@@ -698,39 +838,33 @@ class CurvesROIPage(ctk.CTkFrame):
     # ── curve range / axes sync ───────────────────────────────────────────────
 
     def _sync_curve_block_from_data(self, block, times: list, values: list) -> None:
-        """Reconfigure range sliders and axis limits to match freshly sampled curve data."""
+        """
+        Reconfigure range sliders and axis limits to match curve data.
+        Axes are fitted tightly — no padding beyond the data range.
+        """
         if not times:
             return
 
-        ax = block.ax
-        ax.set_xlim(times[0] - 0.5, times[-1] + 0.5)
-        v_min, v_max = min(values), max(values)
-        pad = max(1.0, (v_max - v_min) * 0.15)
-        ax.set_ylim(v_min - pad, v_max + pad)
-
-        times_arr = np.array(times)
+        times_arr = np.asarray(times, dtype=float)
+        values_arr = np.asarray(values, dtype=float)
 
         t_start = float(times_arr[0])
         t_end = float(times_arr[-1])
+        v_min = float(np.min(values_arr))
+        v_max = float(np.max(values_arr))
 
-        n_steps = len(times_arr) - 1  # Number of steps = number of intervals between points
+        # tight y padding — just enough so markers aren't clipped
+        y_pad = max(1.0, (v_max - v_min) * 0.08)
 
-        # Initialize slider values to full range
+        block.ax.set_xlim(t_start, t_end)
+        block.ax.set_ylim(v_min - y_pad, v_max + y_pad)
+
+        n_steps = max(1, len(times_arr) - 1)
         block.var_start.set(t_start)
         block.var_end.set(t_end)
 
-        # Configure sliders to snap to actual time points
-        block.s_start.configure(
-            from_=t_start,
-            to=t_end,
-            number_of_steps=n_steps
-        )
-
-        block.s_end.configure(
-            from_=t_start,
-            to=t_end,
-            number_of_steps=n_steps
-        )
+        block.s_start.configure(from_=t_start, to=t_end, number_of_steps=n_steps)
+        block.s_end.configure(from_=t_start, to=t_end, number_of_steps=n_steps)
 
         block.start_line.set_xdata([t_start, t_start])
         block.end_line.set_xdata([t_end, t_end])
@@ -1068,45 +1202,183 @@ class CurvesROIPage(ctk.CTkFrame):
     #     except Exception as exc:
     #         print(f"[{block.lesion}] Plotting failed: {exc}")
 
+    def _time_to_index(self, time_value: float, times: np.ndarray) -> int:
+        """
+        Convert a time value (seconds) → 1-based sample index.
+        Nearest-neighbour, clamped to [1, len(times)].
+        Matches how MATLAB receives baseline/washout as 1-based indices.
+        """
+        idx = int(np.argmin(np.abs(times - time_value))) + 1  # 1-based
+        return max(1, min(idx, len(times)))
+
+    def _resolve_fit_indices(self, block) -> tuple[int, int]:
+        """
+        Determine baseline and washout as 1-based indices from whichever control
+        the user has set.
+
+        Priority:
+          - If the Baseline/Washout Entry fields contain a non-zero integer,
+            use them directly (they are already index values when the user types
+            an integer, or they hold a time value synced from the slider).
+          - Otherwise fall back to the Start/End slider time values and convert
+            to nearest-index.
+
+        Returns
+        -------
+        (baseline_idx, washout_idx) : both 1-based ints
+        """
+        times = np.asarray(block.times, dtype=float)
+
+        # --- Baseline / start ---
+        baseline_idx = 0
+        try:
+            raw = block.var_baseline.get().strip()
+            val = float(raw)
+            if val != 0:
+                # Decide: if the value is larger than len(times) it's a time, else index
+                if val <= len(times):
+                    baseline_idx = max(1, min(int(round(val)), len(times)))
+                else:
+                    baseline_idx = self._time_to_index(val, times)
+        except (ValueError, AttributeError):
+            pass
+
+        if baseline_idx == 0:
+            # fall back to slider
+            try:
+                start_time = float(block.var_start.get())
+                baseline_idx = self._time_to_index(start_time, times)
+            except (ValueError, AttributeError):
+                baseline_idx = 1
+
+        # --- Washout / end ---
+        washout_idx = 0
+        try:
+            raw = block.var_washout.get().strip()
+            val = float(raw)
+            if val != 0:
+                if val <= len(times):
+                    washout_idx = max(1, min(int(round(val)), len(times)))
+                else:
+                    washout_idx = self._time_to_index(val, times)
+        except (ValueError, AttributeError):
+            pass
+
+        if washout_idx == 0:
+            try:
+                end_time = float(block.var_end.get())
+                washout_idx = self._time_to_index(end_time, times)
+            except (ValueError, AttributeError):
+                washout_idx = len(times)
+
+        # Sanity clamp
+        baseline_idx = max(1, min(baseline_idx, len(times)))
+        washout_idx = max(baseline_idx, min(washout_idx, len(times)))
+
+        return baseline_idx, washout_idx
+
     # =========================================================================
     # Fitting handler
     # =========================================================================
 
     def _on_fit_curve(self, block) -> None:
+        """
+        Fit a gamma-variate curve between the Start and End slider positions.
+        Axis limits are locked after all plot calls so nothing overrides them.
+        """
         if not block.times or len(block.times) < 4:
             print("Not enough points to fit a curve.")
             return
 
         try:
-            times = np.array(block.times)
-            values = np.array(block.values)
+            times = np.asarray(block.times, dtype=float)
+            values = np.asarray(block.values, dtype=float)
 
-            start_val = float(block.var_start.get())
-            end_val = float(block.var_end.get())
+            # ── 1. Read start / end slider values ──────────────────────────────
+            t_start = float(block.var_start.get())
+            t_end = float(block.var_end.get())
 
-            tol = (times[-1] - times[0]) / max(len(times) * 2, 1)
-            mask = (times >= start_val - tol) & (times <= end_val + tol)
+            if t_start >= t_end:
+                t_start = float(times[0])
+                t_end = float(times[-1])
+                block.var_start.set(t_start)
+                block.var_end.set(t_end)
 
-            # If slider range captures too few points, fall back to all points
-            if np.sum(mask) < 4:
+            # ── 2. Trim to [start, end] ─────────────────────────────────────────
+            mask = (times >= t_start) & (times <= t_end)
+            if mask.sum() < 4:
                 mask = np.ones(len(times), dtype=bool)
 
             times_fit = times[mask]
             values_fit = values[mask]
 
-            if len(times_fit) < 4:
-                print("Not enough points to fit.")
-                return
+            # ── 3. Convert to 1-based indices ──────────────────────────────────
+            baseline_idx = int(np.argmin(np.abs(times - t_start))) + 1
+            washout_idx = int(np.argmin(np.abs(times - t_end))) + 1
+            baseline_idx = max(1, min(baseline_idx, len(times)))
+            washout_idx = max(baseline_idx, min(washout_idx, len(times)))
 
-            # Trim block data to only the fitted range
-            block.times = times_fit.tolist()
-            block.values = values_fit.tolist()
+            block.var_baseline.set(str(baseline_idx))
+            block.var_washout.set(str(washout_idx))
 
-            f = interp1d(times_fit, values_fit, kind='cubic', fill_value='extrapolate')
-            smooth_times = np.linspace(times_fit[0], times_fit[-1], 300)
-            smooth_values = f(smooth_times)
+            print(f"[FitCurve | {block.lesion}] "
+                  f"t={t_start:.2f}–{t_end:.2f}s  "
+                  f"idx={baseline_idx}–{washout_idx}  "
+                  f"pts={mask.sum()}")
 
-            # Full redraw: only in-range dots + fit line, no range lines
+            # ── 4. Run gamma-variate pipeline ───────────────────────────────────
+            try:
+                result = get_fitted_curve(
+                    sample_curve=values,
+                    sample_time=times,
+                    baseline=baseline_idx,
+                    washout=washout_idx,
+                )
+            except Exception as primary_exc:
+                print(f"  Primary gamma fit failed ({primary_exc}); trying safe fallback …")
+                result = get_fitted_curve_safe(
+                    sample_curve=values,
+                    sample_time=times,
+                    baseline=baseline_idx,
+                    washout=washout_idx,
+                )
+
+            print(f"  converged={result.converged}, RMSE={result.rmse:.3f}, "
+                  f"K={result.k:.3f}, α={result.alpha:.3f}, β={result.beta:.3f}, "
+                  f"AUC={result.auc:.1f}")
+
+            # ── 5. Trim fitted curve to [t_start, t_end] ────────────────────────
+            ft = result.fitted_time
+            fc = result.fitted_curve
+            fit_mask = (ft >= t_start) & (ft <= t_end)
+            if fit_mask.sum() < 2:
+                fit_mask = np.ones(len(ft), dtype=bool)
+            ft_display = ft[fit_mask]
+            fc_display = fc[fit_mask]
+
+            # ── 6. Compute tight axis limits from ALL visible data ──────────────
+            all_y = np.concatenate([values_fit, fc_display])
+            y_min = float(np.min(all_y))
+            y_max = float(np.max(all_y))
+            y_pad = max(1.0, (y_max - y_min) * 0.08)
+            y_lo = y_min - y_pad
+            y_hi = y_max + y_pad
+
+            # Nice round tick interval: aim for ~5 ticks
+            raw_interval = (y_hi - y_lo) / 5.0
+            # Round to nearest "nice" number
+            magnitude = 10 ** np.floor(np.log10(max(raw_interval, 1e-9)))
+            nice_interval = max(1, int(round(raw_interval / magnitude) * magnitude))
+            y_ticks = np.arange(
+                int(np.floor(y_lo / nice_interval)) * nice_interval,
+                int(np.ceil(y_hi / nice_interval)) * nice_interval + nice_interval,
+                nice_interval,
+            )
+            # Expand limits to fully contain the outermost ticks
+            y_lo = float(y_ticks[0]) - y_pad * 0.5
+            y_hi = float(y_ticks[-1]) + y_pad * 0.5
+
+            # ── 7. Redraw ────────────────────────────────────────────────────────
             block.ax.cla()
             block.ax.set_facecolor("black")
             block.ax.set_xlabel("Time (s)", color="white")
@@ -1122,32 +1394,50 @@ class CurvesROIPage(ctk.CTkFrame):
                 lesion_type=block.lesion,
                 time_unit="s",
             )
-
             plot_fitted_overlay(
                 ax=block.ax,
-                fitted_time=smooth_times,
-                fitted_curve=smooth_values,
+                fitted_time=ft_display,
+                fitted_curve=fc_display,
                 lesion_type=block.lesion,
             )
 
-            self._sync_curve_block_from_data(block, block.times, block.values)
+            # ── 8. Lock axis limits AFTER all plot calls ─────────────────────────
+            # This must come last — plot_sampled_curve/_configure_axes may have
+            # reset the limits to the MATLAB formula. We override them here.
+            block.ax.autoscale(False)  # prevent any further auto-scaling
+            block.ax.set_xlim(t_start, t_end)
+            block.ax.set_ylim(y_lo, y_hi)
+            block.ax.set_yticks(y_ticks)
+            x_ticks = np.unique(np.linspace(t_start, t_end, 11).astype(int))
+            block.ax.set_xticks(x_ticks)
+            block.ax.set_xticklabels([str(int(t)) for t in x_ticks])
 
-            # Recreate range lines as invisible
+            # ── 9. Reconfigure sliders to trimmed range ──────────────────────────
+            n_steps = max(1, mask.sum() - 1)
+            block.s_start.configure(from_=t_start, to=t_end, number_of_steps=n_steps)
+            block.s_end.configure(from_=t_start, to=t_end, number_of_steps=n_steps)
+            block.var_start.set(t_start)
+            block.var_end.set(t_end)
+
             block.start_line = block.ax.axvline(
-                times_fit[0], color=THEME["accent"], linewidth=2, visible=False
+                t_start, color=THEME["accent"], linewidth=2, visible=False
             )
             block.end_line = block.ax.axvline(
-                times_fit[-1], color=THEME["accent"], linewidth=2, visible=False
+                t_end, color=THEME["accent"], linewidth=2, visible=False
             )
 
             block.canvas.draw()
-            print(f"Fitted [{block.lesion}]: {len(times_fit)} pts, "
-                  f"t={times_fit[0]:.1f}–{times_fit[-1]:.1f}s")
 
-        except Exception as e:
-            print(f"Fitting error: {e}")
+            print(f"  Plotted [{block.lesion}]: "
+                  f"{mask.sum()} dots, {fit_mask.sum()} fitted pts, "
+                  f"y=[{y_lo:.1f}, {y_hi:.1f}]")
+
+        except Exception as exc:
+            print(f"Fitting error: {exc}")
             import traceback
-            traceback.print_exc()    # =========================================================================
+            traceback.print_exc()
+
+    # =========================================================================
     # New: Plot click → select point / Edit / Remove
     # =========================================================================
 
