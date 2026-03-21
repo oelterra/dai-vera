@@ -227,13 +227,16 @@ def get_best_sample(
                     
 
     # ── Interpolation  (MATLAB: if timePoints < 25) ──────────────────────────
-    if n_time < 25:
-        interp_values, interp_times = get_interpolated_curve(
-            time_point_values, best_curve, target_points=25
-        )
-    else:
-        interp_values = best_curve.copy()
-        interp_times  = time_point_values.copy()
+    # if n_time < 25:
+    #     interp_values, interp_times = get_interpolated_curve(
+    #         time_point_values, best_curve, target_points=25
+    #     )
+    # else:
+    #     interp_values = best_curve.copy()
+    #     interp_times  = time_point_values.copy()
+    # interpolation without 25 time points, just the exact amount of time points:
+    interp_values = best_curve.copy()
+    interp_times = time_point_values.copy()
 
     return {
         "best_curve":                   best_curve,

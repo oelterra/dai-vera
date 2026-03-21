@@ -18,8 +18,8 @@ from skimage.morphology import binary_erosion
 @dataclass
 class ROIContourResult:
     """Returned by detect_roi_contour on success."""
-    filled_coords: np.ndarray       # (N, 2) row/col in full image space
-    boundary_coords: np.ndarray     # (M, 2) row/col in full image space
+    filled_coords: np.ndarray  # (N, 2) row/col in full image space
+    boundary_coords: np.ndarray  # (M, 2) row/col in full image space
     long_axis: float
     short_axis: float
     area: int
@@ -55,10 +55,10 @@ class CurveData:
 # ---------------------------------------------------------------------------
 
 def detect_roi_contour(
-    image: np.ndarray,
-    x: int,
-    y: int,
-    window: int,
+        image: np.ndarray,
+        x: int,
+        y: int,
+        window: int,
 ) -> Optional[ROIContourResult]:
     """
     Detect the boundary and filled region of the brightest blob near (x, y).
@@ -121,16 +121,15 @@ def detect_roi_contour(
     )
 
 
-
 # Curve sampling
 
 
 def sample_curve_from_volume(
-    pixels: np.ndarray,
-    filled_coords: np.ndarray,
-    z_idx: int,
-    times: Optional[list[float]] = None,
-    height_positive: bool = False,
+        pixels: np.ndarray,
+        filled_coords: np.ndarray,
+        z_idx: int,
+        times: Optional[list[float]] = None,
+        height_positive: bool = False,
 ) -> CurveData:
     """
     Build a time-intensity curve by averaging pixel values inside a ROI mask
@@ -162,12 +161,33 @@ def sample_curve_from_volume(
 
     # resolve time axis
     if times and len(times) == T:
-        t_arr = np.array(times, dtype=float)
+        # t_arr = np.array(times, dtype=float)
         # convert ms → s when values suggest milliseconds
-        if len(t_arr) > 1 and t_arr[1] >= 500:
-            t_arr = t_arr / 1000.0
+        # if t_arr.max() > 10000:
+        def dicom_time_to_seconds(t):
+            hh = int(t // 10000)
+            mm = int((t % 10000) // 100)
+            ss = t % 100
+            return hh * 3600 + mm * 60 + ss
+
+
+        print("---- TIME DEBUG !!!!!!!!!!")
+        print("Raw times:", times[:10])
+        print("Min:", np.min(t_arr), "Max:", np.max(t_arr))
+        print("Diffs:", np.diff(t_arr)[:5])
+        print("--------------------")
+
+        t_arr = np.array([dicom_time_to_seconds(t) for t in t_arr])
+        t_arr = t_arr - t_arr[0]
+
+
     else:
         t_arr = np.arange(T, dtype=float)
+        print("---- TIME DEBUG ----")
+        print("Raw times:", times[:10])
+        print("Min:", np.min(t_arr), "Max:", np.max(t_arr))
+        print("Diffs:", np.diff(t_arr)[:5])
+        print("--------------------")
 
     z_clamped = min(max(0, z_idx), Z - 1)
     values = np.array(
@@ -188,9 +208,9 @@ def sample_curve_from_volume(
 # Image windowing
 
 def window_to_uint8(
-    img: np.ndarray,
-    length: float,
-    width: float,
+        img: np.ndarray,
+        length: float,
+        width: float,
 ) -> np.ndarray:
     """
     Apply a windowing transform and return a uint8 image for display.
@@ -247,10 +267,10 @@ def save_roi_to_json(roi_dict: dict, path: Optional[str] = None) -> str:
 # ---------------------------------------------------------------------------
 
 def make_test_volume(
-    T: int = 24,
-    Z: int = 10,
-    H: int = 256,
-    W: int = 256,
+        T: int = 24,
+        Z: int = 10,
+        H: int = 256,
+        W: int = 256,
 ) -> dict:
     """
     Generate a synthetic CTP volume with a gamma-variate bolus planted at a

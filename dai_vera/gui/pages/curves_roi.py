@@ -18,7 +18,7 @@ from customtkinter import CTkButton
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from PIL import Image, ImageTk
-from scipy.interpolate import interp1d 
+from scipy.interpolate import interp1d
 
 from dai_vera.gui.theme import THEME, FONTS
 
@@ -36,10 +36,11 @@ from dai_vera.roi_json import save_roi_as_json
 # window_to_uint8 and make_test_volume still live in curves_roi_logic
 # (it was never moved out — keep importing from there)
 from dai_vera.curves_roi_logic import window_to_uint8, make_test_volume
+
 # from drawlesioncurves import get_fitted_curve_safe
 
 LesionType = Literal["pre", "post"]
-_SEGMENTATION_WINDOW = 25   # matches MATLAB segmentationWindowSize
+_SEGMENTATION_WINDOW = 25  # matches MATLAB segmentationWindowSize
 
 
 class CurvesROIPage(ctk.CTkFrame):
@@ -78,13 +79,13 @@ class CurvesROIPage(ctk.CTkFrame):
         self._last_boundary_coords: Optional[np.ndarray] = None
         self._movie_after_id: Optional[str] = None
         self._drag_start: Optional[tuple] = None
-        self._ctp_photo = None                      # keep PhotoImage reference alive
+        self._ctp_photo = None  # keep PhotoImage reference alive
 
-        self.pre_lesion_block  = None
+        self.pre_lesion_block = None
         self.post_lesion_block = None
 
         # ROI objects set after each lesion button click
-        self.pre_roi:  Optional[ROIObject] = None
+        self.pre_roi: Optional[ROIObject] = None
         self.post_roi: Optional[ROIObject] = None
 
         # ── build widgets ─────────────────────────────────────────────────────
@@ -92,11 +93,8 @@ class CurvesROIPage(ctk.CTkFrame):
         self._build_right_graphs()
 
         # ── deferred init ─────────────────────────────────────────────────────
-        self.after(80,  self._render_ctp_image)
+        self.after(80, self._render_ctp_image)
         # self.after(100, self._inject_test_volume)
-
-    
-
 
     # =========================================================================
     # LEFT PANEL — CTP viewer + controls
@@ -329,7 +327,7 @@ class CurvesROIPage(ctk.CTkFrame):
     # =========================================================================
 
     def _build_right_graphs(self) -> None:
-        self._build_curve_block(parent=self.right, title="Pre Lesion Curve",  row=0, is_pre=True)
+        self._build_curve_block(parent=self.right, title="Pre Lesion Curve", row=0, is_pre=True)
         self._build_curve_block(parent=self.right, title="Post Lesion Curve", row=1, is_pre=False)
 
     def _build_curve_block(self, parent, title: str, row: int, is_pre: bool) -> None:
@@ -383,13 +381,13 @@ class CurvesROIPage(ctk.CTkFrame):
         fig.subplots_adjust(left=0.12, right=0.98, top=0.95, bottom=0.18)
 
         # per-block data
-        block.lesion     = lesion
-        block.fig        = fig
-        block.ax         = ax
-        block.times      = []    # sampled time axis
-        block.values     = []    # sampled HU values
-        block.start_line = ax.axvline(0,  color=THEME["accent"], linewidth=2)
-        block.end_line   = ax.axvline(10, color=THEME["accent"], linewidth=2)
+        block.lesion = lesion
+        block.fig = fig
+        block.ax = ax
+        block.times = []  # sampled time axis
+        block.values = []  # sampled HU values
+        block.start_line = ax.axvline(0, color=THEME["accent"], linewidth=2)
+        block.end_line = ax.axvline(10, color=THEME["accent"], linewidth=2)
         block.selected_idx = None
 
         canvas = FigureCanvasTkAgg(fig, master=block)
@@ -408,7 +406,8 @@ class CurvesROIPage(ctk.CTkFrame):
         controls.grid_columnconfigure(1, weight=1)
         controls.grid_columnconfigure(3, weight=1)
 
-        ctk.CTkLabel(controls, text="Start", text_color=THEME["muted"], font=FONTS["small"]).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(controls, text="Start", text_color=THEME["muted"], font=FONTS["small"]).grid(row=0, column=0,
+                                                                                                  sticky="w")
         block.var_start = ctk.IntVar(value=0)
         block.s_start = ctk.CTkSlider(
             controls, from_=0, to=10, number_of_steps=10,
@@ -420,7 +419,8 @@ class CurvesROIPage(ctk.CTkFrame):
         )
         block.s_start.grid(row=0, column=1, sticky="ew", padx=(8, 16))
 
-        ctk.CTkLabel(controls, text="End", text_color=THEME["muted"], font=FONTS["small"]).grid(row=0, column=2, sticky="w")
+        ctk.CTkLabel(controls, text="End", text_color=THEME["muted"], font=FONTS["small"]).grid(row=0, column=2,
+                                                                                                sticky="w")
         block.var_end = ctk.IntVar(value=10)
         block.s_end = ctk.CTkSlider(
             controls, from_=0, to=10, number_of_steps=10,
@@ -437,31 +437,26 @@ class CurvesROIPage(ctk.CTkFrame):
                 return
 
             start_val = int(b.var_start.get())
-            end_val   = int(b.var_end.get())
+            end_val = int(b.var_end.get())
 
             if start_val > end_val:
                 start_val, end_val = end_val, start_val
                 b.var_start.set(start_val)
                 b.var_end.set(end_val)
 
-            # Move vertical lines
+            # Show lines as soon as the user touches a slider
             b.start_line.set_xdata([start_val, start_val])
             b.end_line.set_xdata([end_val, end_val])
+            b.start_line.set_visible(True)
+            b.end_line.set_visible(True)
 
-            # Filter data within selected time range
             times = np.array(b.times)
             values = np.array(b.values)
-
             mask = (times >= start_val) & (times <= end_val)
 
             if np.any(mask):
-                t_filtered = times[mask]
-                v_filtered = values[mask]
-
-                # Update axis limits to selected region
                 b.ax.set_xlim(min(b.times), max(b.times))
-
-                vmin, vmax = np.min(v_filtered), np.max(v_filtered)
+                vmin, vmax = np.min(values[mask]), np.max(values[mask])
                 pad = max(1.0, (vmax - vmin) * 0.15)
                 b.ax.set_ylim(vmin - pad, vmax + pad)
 
@@ -549,13 +544,11 @@ class CurvesROIPage(ctk.CTkFrame):
         self.lbl_ctp_time_val.configure(text=str(self.var_ctp_time.get()))
         print("Volume shape:", pixels.shape)
 
-
         # Only reconfigure sliders if they're not initialized properly
         # This prevents slider reset during movie playback
         if self.slider_ctp_slice.cget("to") != Z or self.slider_ctp_time.cget("to") != T:
-
             slice_steps = max(1, Z - 1)
-            time_steps  = max(1, T - 1)
+            time_steps = max(1, T - 1)
 
             self.slider_ctp_slice.configure(
                 from_=1,
@@ -578,14 +571,14 @@ class CurvesROIPage(ctk.CTkFrame):
         img8 = window_to_uint8(
             pixels[t_idx, z_idx],
             length=float(getattr(self.state, "ctp_length", 0.5)),
-            width=float(getattr(self.state, "ctp_width",  0.5)),
+            width=float(getattr(self.state, "ctp_width", 0.5)),
         )
 
         cw = max(10, self.img_canvas.winfo_width())
         ch = max(10, self.img_canvas.winfo_height())
 
         photo = ImageTk.PhotoImage(Image.fromarray(img8).resize((cw, ch)))
-        self._ctp_photo = photo   # keep reference alive
+        self._ctp_photo = photo  # keep reference alive
 
         self.img_canvas.delete("all")
         self.img_canvas.create_image(cw // 2, ch // 2, image=photo, anchor="center")
@@ -594,17 +587,19 @@ class CurvesROIPage(ctk.CTkFrame):
         if self._last_boundary_coords is not None:
             self._draw_contour_on_canvas(self._last_boundary_coords)
 
-    def _redraw_curve(self, block, _lesion_type=None) -> None:
-        """Fixed signature to handle the optional lesion_type argument from Undo/Clear"""
+    def _redraw_curve(self, block, lesion_type=None) -> None:
+        """Redraws the curve block. lesion_type is accepted but unused (block.lesion is authoritative)."""
         ax = block.ax
-        
-        # Clear previous fitted lines, but keep the axis setup
-        for line in ax.lines[:]:
-            if line not in (block.start_line, block.end_line):
-                line.remove()
-                
+        ax.cla()
+
+        ax.set_facecolor("black")
+        ax.set_xlabel("Time (s)", color="white")
+        ax.set_ylabel("Enhancement (HU)", color="white")
+        for spine in ax.spines.values():
+            spine.set_color("white")
+        ax.tick_params(colors="white")
+
         if block.times:
-            # Re-plot dots using your custom plotter
             plot_sampled_curve(
                 ax=block.ax,
                 times=np.array(block.times),
@@ -612,6 +607,17 @@ class CurvesROIPage(ctk.CTkFrame):
                 lesion_type=block.lesion,
                 time_unit="s",
             )
+            self._sync_curve_block_from_data(block, block.times, block.values)
+
+        # Range lines: only recreate as invisible — shown only when sliders move
+        block.start_line = ax.axvline(
+            block.var_start.get() if block.times else 0,
+            color=THEME["accent"], linewidth=2, visible=False
+        )
+        block.end_line = ax.axvline(
+            block.var_end.get() if block.times else 10,
+            color=THEME["accent"], linewidth=2, visible=False
+        )
         block.canvas.draw_idle()
 
     # ── canvas overlays ───────────────────────────────────────────────────────
@@ -657,10 +663,9 @@ class CurvesROIPage(ctk.CTkFrame):
             self.current_y = event.y
             self._on_set_lesion("pre")
 
-        self.img_canvas.tag_bind("drag_point", "<ButtonPress-1>",   lambda e: None)
-        self.img_canvas.tag_bind("drag_point", "<B1-Motion>",       on_drag)
+        self.img_canvas.tag_bind("drag_point", "<ButtonPress-1>", lambda e: None)
+        self.img_canvas.tag_bind("drag_point", "<B1-Motion>", on_drag)
         self.img_canvas.tag_bind("drag_point", "<ButtonRelease-1>", on_release)
-
 
     # draggable point for both pre/post lesions:
     def _add_draggable_point(self, cx: int, cy: int, lesion: LesionType) -> None:
@@ -703,23 +708,18 @@ class CurvesROIPage(ctk.CTkFrame):
         pad = max(1.0, (v_max - v_min) * 0.15)
         ax.set_ylim(v_min - pad, v_max + pad)
 
-        # Get clean integer timepoints
         times_arr = np.array(times)
-        # unique_times = np.unique(np.round(times_arr).astype(int))
 
-        t_start = float(times_arr.min())
-        t_end   = float(times_arr.max())
+        t_start = float(times_arr[0])
+        t_end = float(times_arr[-1])
 
-        n_steps = max(1, len(times_arr) - 1)
+        n_steps = len(times_arr) - 1  # Number of steps = number of intervals between points
 
-        # THIS is where your line goes
-        # n_steps = max(1, len(unique_times) - 1)
+        # Initialize slider values to full range
+        block.var_start.set(t_start)
+        block.var_end.set(t_end)
 
-        # Set slider values
-        block.var_start = ctk.DoubleVar(value=0.0)
-        block.var_end   = ctk.DoubleVar(value=10.0)
-
-        # Configure sliders to snap to timepoints
+        # Configure sliders to snap to actual time points
         block.s_start.configure(
             from_=t_start,
             to=t_end,
@@ -731,8 +731,9 @@ class CurvesROIPage(ctk.CTkFrame):
             to=t_end,
             number_of_steps=n_steps
         )
+
         block.start_line.set_xdata([t_start, t_start])
-        block.end_line.set_xdata([t_end,   t_end])
+        block.end_line.set_xdata([t_end, t_end])
 
     # =========================================================================
     # Event handlers
@@ -752,11 +753,11 @@ class CurvesROIPage(ctk.CTkFrame):
         val = int(self.var_ctp_time.get())
         self.lbl_ctp_time_val.configure(text=str(val))
         self.state.ctp_time = val
-        self._render_ctp_image() 
+        self._render_ctp_image()
 
     def _sync_window_to_state(self) -> None:
         self.state.ctp_length = float(self.var_len.get())
-        self.state.ctp_width  = float(self.var_wid.get())
+        self.state.ctp_width = float(self.var_wid.get())
         self._render_ctp_image()
 
     def _toggle_movie(self) -> None:
@@ -789,15 +790,15 @@ class CurvesROIPage(ctk.CTkFrame):
         current_val = int(self.var_ctp_time.get())
         # increment and wrap (1-based indexing)
         next_val = (current_val % max_t) + 1
-        
+
         # update slider and state
         self.var_ctp_time.set(next_val)
         self.state.ctp_time = next_val
         self.lbl_ctp_time_val.configure(text=str(next_val))
-        
+
         # render without reconfiguring sliders
         self._render_ctp_image()
-        
+
         self._movie_after_id = self.after(delay, self._movie_loop)
 
     def _curve_undo(self, block) -> None:
@@ -805,20 +806,18 @@ class CurvesROIPage(ctk.CTkFrame):
             block.times.pop()
             block.values.pop()
             block.selected_idx = None
-            # Pass the block's internal lesion type ('pre' or 'post')
             self._redraw_curve(block, lesion_type=block.lesion)
 
     def _curve_clear(self, block) -> None:
         block.times = []
         block.values = []
         block.selected_idx = None
-        # Fix the typo "prep" -> block.lesion
         self._redraw_curve(block, lesion_type=block.lesion)
 
     # =========================================================================
     # New: Set Lesion handler (FIXED graph plotting)
     # =========================================================================
-    
+
     def _on_set_lesion(self, lesion: LesionType) -> None:
 
         if self.current_x is None or self.current_y is None:
@@ -832,69 +831,99 @@ class CurvesROIPage(ctk.CTkFrame):
 
         pixels: np.ndarray = vol["pixels"]  # (T, Z, H, W)
         T, Z, H, W = pixels.shape
-        time_points   = np.asarray(vol.get("times", np.arange(T, dtype=float)))
+
+        raw_times = np.asarray(vol.get("times", np.arange(T, dtype=float)))
+        print(f"DEBUG _on_set_lesion:")
+        print(f"  T = {T}")
+        print(f"  vol.get('times') = {vol.get('times')}")
+        print(f"  len(raw_times) = {len(raw_times)}")
+        print(f"  raw_times = {raw_times}")
+
+        def dicom_time_to_seconds(t_val):
+            if t_val > 10000:
+                hh = int(t_val // 10000)
+                mm = int((t_val % 10000) // 100)
+                ss = t_val % 100
+                return hh * 3600 + mm * 60 + ss
+            return t_val # in seconds
+
+        # convert all time points
+        time_points_seconds = np.array([dicom_time_to_seconds(t) for t in raw_times])
+        time_points = time_points_seconds - time_points_seconds[0]
+        # time_points = np.asarray(vol.get("times", np.arange(T, dtype=float)))
         pixel_spacing = vol.get("pixel_spacing", (0.5, 0.5))
 
-        t_idx = min(max(0, int(self.var_ctp_time.get())  - 1), T - 1)
+        t_idx = min(max(0, int(self.var_ctp_time.get()) - 1), T - 1)
         z_idx = min(max(0, int(self.var_ctp_slice.get()) - 1), Z - 1)
 
         click_row = self.current_y
         click_col = self.current_x
-        sample_n  = int(self.var_sample_roi.get().split("x")[0].strip())
-        search_n  = int(self.var_search_roi.get().split("x")[0].strip())
+        sample_n = int(self.var_sample_roi.get().split("x")[0].strip())
+        search_n = int(self.var_search_roi.get().split("x")[0].strip())
         search_px = max(search_n * 20, 20)
 
         # 1. get_best_sample
         sample = get_best_sample(
-            x                 = click_row,
-            y                 = click_col,
-            window_size       = search_px,
-            roi_m             = sample_n,
-            roi_n             = sample_n,
-            slice_idx         = z_idx,
-            four_d_image_set  = pixels,
-            time_point_values = time_points,
+            x=click_row,
+            y=click_col,
+            window_size=search_px,
+            roi_m=sample_n,
+            roi_n=sample_n,
+            slice_idx=z_idx,
+            four_d_image_set=pixels,
+            time_point_values=time_points,
         )
         interp_times = sample["interpolated_time_points"]
-        interp_vals  = sample["interpolated_sampled_points"]
-        sx_rows      = sample["search_window_rows"]
-        sx_cols      = sample["search_window_cols"]
+        interp_vals = sample["interpolated_sampled_points"]
+        sx_rows = sample["search_window_rows"]
+        sx_cols = sample["search_window_cols"]
 
         if len(interp_times) == 0 or len(interp_vals) == 0:
             print("ERROR: sampled points are empty!")
             return
-        
+
+        print("debug: show sampled curve")
+        print(f"Sampled curve [{lesion}]:")
+        print(f"  Times: {interp_times[:5]}")
+        print(f"  Values: {[f'{v:.1f}' for v in interp_vals[:5]]}")
+
         print("RAW TIMES:", time_points[:10])
         print("INTERP TIMES:", interp_times[:10])
         print("VALUES:", interp_vals[:10])
 
+        print("\n==== DEBUG TIME ====")
+        print("T:", T)
+        print("time_points (raw):", time_points[:20])
+        print("min:", np.min(time_points), "max:", np.max(time_points))
+        print("====================\n")
+
         # 2. get_contour
         contour = get_contour(
-            x                  = click_row,
-            y                  = click_col,
-            search_window_size = _SEGMENTATION_WINDOW,
-            slice_idx          = z_idx,
-            time_point_idx     = t_idx,
-            four_d_image_set   = pixels,
-            pixel_spacing      = pixel_spacing,
+            x=click_row,
+            y=click_col,
+            search_window_size=_SEGMENTATION_WINDOW,
+            slice_idx=z_idx,
+            time_point_idx=t_idx,
+            four_d_image_set=pixels,
+            pixel_spacing=pixel_spacing,
         )
         print(f"[{lesion}] radius={contour.radius_cm:.3f} cm  area={contour.area_cm2:.4f} cm²")
 
         # 3. get_roi
         roi_obj = get_roi(
-            study_name         = getattr(self.state, "study_name", "Unknown"),
-            num_time_points    = T,
-            num_slices         = Z,
-            x = click_row, y = click_col, z = z_idx, t = t_idx,
-            sampled_curve      = interp_vals.tolist(),
-            time_points        = time_points.tolist(),
-            fitted_curve       = [],
-            fitted_time_points = [],
-            roi_x_boundary     = sx_rows.tolist(),
-            roi_y_boundary     = sx_cols.tolist(),
+            study_name=getattr(self.state, "study_name", "Unknown"),
+            num_time_points=T,
+            num_slices=Z,
+            x=click_row, y=click_col, z=z_idx, t=t_idx,
+            sampled_curve=interp_vals.tolist(),
+            time_points=time_points.tolist(),
+            fitted_curve=[],
+            fitted_time_points=[],
+            roi_x_boundary=sx_rows.tolist(),
+            roi_y_boundary=sx_cols.tolist(),
         )
         if lesion == "pre":
-            self.pre_roi  = roi_obj
+            self.pre_roi = roi_obj
             # block = self.pre_lesion_block
         else:
             self.post_roi = roi_obj
@@ -902,7 +931,7 @@ class CurvesROIPage(ctk.CTkFrame):
 
         # 4. save_roi_as_json
         bundle = {
-            "preRoiObject":  self._roi_to_dict(self.pre_roi),
+            "preRoiObject": self._roi_to_dict(self.pre_roi),
             "postRoiObject": self._roi_to_dict(self.post_roi),
         }
         path = save_roi_as_json(bundle)
@@ -911,56 +940,57 @@ class CurvesROIPage(ctk.CTkFrame):
         # 5. get_roi_overlayed → burn boundary → re-render canvas
         image_2d = pixels[t_idx, z_idx].copy().astype(np.float32)
         overlaid = get_roi_overlayed(image_2d, sx_rows, sx_cols, overlay_value=1500.0)
-        # render it directly 
+        # render it directly
         self._render_ctp_image_with(overlaid)
-        # then draw crosshair 
+        # then draw crosshair
         self._draw_crosshair(self.current_x, self.current_y)
         self._add_draggable_pre_point(self.current_x, self.current_y)
 
         # 6. Use plot_sampled_curve from drawlesioncurves.py
         block = self.pre_lesion_block if lesion == "pre" else self.post_lesion_block
-        block.times  = interp_times.tolist()
+        block.times = interp_times.tolist()
         block.values = interp_vals.tolist()
         block.selected_idx = None
-        
 
         # Clear previous points and plot freshly
         block.ax.cla()  # clear axes
 
         # Use the proper plotting function instead of manual plotting
         plot_sampled_curve(
-            ax          = block.ax,
-            times       = np.array(block.times),
-            values      = np.array(block.values),
-            lesion_type = lesion,
-            time_unit   = "s",
+            ax=block.ax,
+            times=np.array(block.times),
+            values=np.array(block.values),
+            lesion_type=lesion,
+            time_unit="s",
         )
 
         # Reset axes style exactly like MATLAB
         block.ax.set_facecolor("black")
         block.ax.set_xlabel("Time (s)", color="white")
         block.ax.set_ylabel("Enhancement (HU)", color="white")
-
         for spine in block.ax.spines.values():
             spine.set_color("white")
         block.ax.tick_params(colors="white")
 
-        # Sync sliders to data range
+        # CRITICAL: recreate range lines after cla() destroys them
         self._sync_curve_block_from_data(block, block.times, block.values)
-
-        # block.ax.set_xlim(min(block.times) - 0.5, max(block.times) + 0.5)
-        # v_min, v_max = min(block.values), max(block.values)
-        # pad = max(1.0, (v_max - v_min) * 0.15)
-        # block.ax.set_ylim(v_min - pad, v_max + pad)
-        # block.ax.plot(block.times, block.values, 'o', color="dodgerblue" if lesion=="pre" else "tomato")
+        block.start_line = block.ax.axvline(
+            block.var_start.get(), color=THEME["accent"], linewidth=2, visible=False
+        )
+        block.end_line = block.ax.axvline(
+            block.var_end.get(), color=THEME["accent"], linewidth=2, visible=False
+        )
         block.canvas.draw()
+
+        # auto fit curve through all sampled points immediately
+        self._on_fit_curve(block)
 
     def _render_ctp_image_with(self, image_override: np.ndarray) -> None:
         """Render an already-processed 2-D float image onto the canvas."""
         img8 = window_to_uint8(
             image_override,
             length=float(getattr(self.state, "ctp_length", 0.5)),
-            width=float(getattr(self.state, "ctp_width",  0.5)),
+            width=float(getattr(self.state, "ctp_width", 0.5)),
         )
         cw = max(10, self.img_canvas.winfo_width())
         ch = max(10, self.img_canvas.winfo_height())
@@ -977,7 +1007,7 @@ class CurvesROIPage(ctk.CTkFrame):
     #     if not block.times:
     #         print(f"[{block.lesion}] Set lesion first")
     #         return
-        
+
     #     # print(f"\n=== DEBUG block.values ===")
     #     # print(f"block.values: {block.values[:10] if len(block.values) >= 10 else block.values}")
     #     # print(f"  min={np.min(block.values):.1f}, max={np.max(block.values):.1f}")
@@ -1032,7 +1062,7 @@ class CurvesROIPage(ctk.CTkFrame):
     #             fitted_curve=result.fitted_curve,
     #             lesion_type=block.lesion,
     #             # fit_error=result.rmse  # Optional: display RMSE in legend
-                
+
     #         )
     #         block.canvas.draw()
     #     except Exception as exc:
@@ -1043,69 +1073,81 @@ class CurvesROIPage(ctk.CTkFrame):
     # =========================================================================
 
     def _on_fit_curve(self, block) -> None:
-        """
-        Uses get_fitted_curve_safe to calculate the gamma-variate fit 
-        and overlays it on the existing sampled dots.
-        """
         if not block.times or len(block.times) < 4:
             print("Not enough points to fit a curve.")
             return
 
         try:
-            # 1. Parse manual baseline/washout inputs from the UI entry boxes
-        
-            try:
-                b_val = int(float(block.var_baseline.get() or 0))
-                w_val = int(float(block.var_washout.get() or 0))
-            except ValueError:      # This handles non-numeric text in the boxes
-                b_val = 0
-                w_val = 0
-
-            # 2. Call the SAFE version of the fitting logic
-            # We removed 'crop_range' as it is handled by baseline/washout indices
             times = np.array(block.times)
             values = np.array(block.values)
 
             start_val = float(block.var_start.get())
-            end_val   = float(block.var_end.get())
+            end_val = float(block.var_end.get())
 
-            mask = (times >= start_val) & (times <= end_val)
+            tol = (times[-1] - times[0]) / max(len(times) * 2, 1)
+            mask = (times >= start_val - tol) & (times <= end_val + tol)
 
+            # If slider range captures too few points, fall back to all points
             if np.sum(mask) < 4:
-                print("Not enough points in selected range to fit.")
-                return
+                mask = np.ones(len(times), dtype=bool)
 
             times_fit = times[mask]
             values_fit = values[mask]
 
-            result = get_fitted_curve_safe(
-                sample_curve=values_fit,
-                sample_time=times_fit,
-                baseline=b_val,
-                washout=w_val
-            )
-            #     baseline=b_val,
-            #     washout=w_val
-            # )
+            if len(times_fit) < 4:
+                print("Not enough points to fit.")
+                return
 
-            # 3. Overlay the fitted line on the plot
-            # This uses the specific 'pre' or 'post' color scheme
+            # Trim block data to only the fitted range
+            block.times = times_fit.tolist()
+            block.values = values_fit.tolist()
+
+            f = interp1d(times_fit, values_fit, kind='cubic', fill_value='extrapolate')
+            smooth_times = np.linspace(times_fit[0], times_fit[-1], 300)
+            smooth_values = f(smooth_times)
+
+            # Full redraw: only in-range dots + fit line, no range lines
+            block.ax.cla()
+            block.ax.set_facecolor("black")
+            block.ax.set_xlabel("Time (s)", color="white")
+            block.ax.set_ylabel("Enhancement (HU)", color="white")
+            for spine in block.ax.spines.values():
+                spine.set_color("white")
+            block.ax.tick_params(colors="white")
+
+            plot_sampled_curve(
+                ax=block.ax,
+                times=times_fit,
+                values=values_fit,
+                lesion_type=block.lesion,
+                time_unit="s",
+            )
+
             plot_fitted_overlay(
                 ax=block.ax,
-                fitted_time=result.fitted_time,
-                fitted_curve=result.fitted_curve,
-                lesion_type=block.lesion
+                fitted_time=smooth_times,
+                fitted_curve=smooth_values,
+                lesion_type=block.lesion,
             )
 
-            # 4. Update the UI with the results (optional: print to console for debug)
-            print(f"Fit Results [{block.lesion}]: RMSE={result.rmse:.2f}, AUC={result.auc:.2f}")
-            if not result.converged:
-                print("Warning: Gamma fit did not converge. Using fallback interpolation.")
+            self._sync_curve_block_from_data(block, block.times, block.values)
+
+            # Recreate range lines as invisible
+            block.start_line = block.ax.axvline(
+                times_fit[0], color=THEME["accent"], linewidth=2, visible=False
+            )
+            block.end_line = block.ax.axvline(
+                times_fit[-1], color=THEME["accent"], linewidth=2, visible=False
+            )
+
+            block.canvas.draw()
+            print(f"Fitted [{block.lesion}]: {len(times_fit)} pts, "
+                  f"t={times_fit[0]:.1f}–{times_fit[-1]:.1f}s")
 
         except Exception as e:
             print(f"Fitting error: {e}")
-
-    # =========================================================================
+            import traceback
+            traceback.print_exc()    # =========================================================================
     # New: Plot click → select point / Edit / Remove
     # =========================================================================
 
@@ -1116,29 +1158,28 @@ class CurvesROIPage(ctk.CTkFrame):
         """
         if event.xdata is None or event.ydata is None or not block.times:
             return
-        
+
         times = np.asarray(block.times)
         values = np.asarray(block.values)
-        
+
         # Find nearest point (Euclidean distance in plot coordinates)
         # Normalize by axis ranges for fair distance calculation
         x_range = block.ax.get_xlim()[1] - block.ax.get_xlim()[0]
         y_range = block.ax.get_ylim()[1] - block.ax.get_ylim()[0]
-        
+
         dx = (times - event.xdata) / x_range
         dy = (values - event.ydata) / y_range
-        dists = np.sqrt(dx**2 + dy**2)
-        
+        dists = np.sqrt(dx ** 2 + dy ** 2)
+
         idx = int(np.argmin(dists))
         block.selected_idx = idx
-        
+
         # Highlight the selected point
         self._highlight_selected_point(block, idx)
-        
+
         block.lbl_selected.configure(
             text=f"Point {idx + 1}: t={times[idx]:.2f}s  {values[idx]:.1f} HU"
         )
-
 
     def _highlight_selected_point(self, block, idx: int) -> None:
         """
@@ -1148,23 +1189,23 @@ class CurvesROIPage(ctk.CTkFrame):
         for artist in block.ax.artists:
             if hasattr(artist, '_highlight_marker'):
                 artist.remove()
-        
+
         times = block.times
         values = block.values
         colour = _COLOUR.get(block.lesion, "white")
-        
+
         # Draw highlight circle
         highlight = block.ax.plot(
-            times[idx], values[idx], 
-            'o', 
-            markersize=12, 
+            times[idx], values[idx],
+            'o',
+            markersize=12,
             markerfacecolor='none',
             markeredgecolor='yellow',
             markeredgewidth=2,
             alpha=0.8
         )[0]
         highlight._highlight_marker = True  # tag it for removal
-        
+
         block.canvas.draw_idle()
 
     def _on_edit_point(self, block) -> None:
@@ -1175,18 +1216,18 @@ class CurvesROIPage(ctk.CTkFrame):
         if not block.times:
             print(f"[{block.lesion}] No curve data to edit")
             return
-        
+
         # Simple implementation: use the already-selected point from _on_plot_click
         if block.selected_idx is None:
             print(f"[{block.lesion}] Click a point on the graph first to select it")
             return
-        
+
         # Show dialog to get new HU value
         from tkinter import simpledialog
         idx = block.selected_idx
         current_time = block.times[idx]
         current_hu = block.values[idx]
-        
+
         new_hu = simpledialog.askfloat(
             "Edit Point",
             f"Point at t={current_time:.2f}s\nCurrent HU: {current_hu:.1f}\n\nEnter new HU value:",
@@ -1194,19 +1235,19 @@ class CurvesROIPage(ctk.CTkFrame):
             minvalue=-100,
             maxvalue=1000,
         )
-        
+
         if new_hu is None:  # user cancelled
             return
-        
+
         # Update the value
         block.values[idx] = float(new_hu)
         block.lbl_selected.configure(
             text=f"Point {idx + 1}: t={current_time:.2f}s  {new_hu:.1f} HU (edited)"
         )
-        
+
         # MATLAB: Clear fitted curve when sampled points are modified
         self._clear_fitted_curve(block)
-        
+
         # Redraw sampled curve
         plot_sampled_curve(
             ax=block.ax,
@@ -1215,16 +1256,15 @@ class CurvesROIPage(ctk.CTkFrame):
             lesion_type=block.lesion,
             time_unit="s",
         )
-        
+
         # Re-add the range lines (they get cleared by plot_sampled_curve)
         self._restore_range_lines(block)
-        
+
         block.canvas.draw()
-        
+
         # Update ROI object
         self._update_roi_curve_data(block)
         print(f"[{block.lesion}] Point {idx + 1} updated to {new_hu:.1f} HU")
-
 
     def _on_remove_point(self, block) -> None:
         """
@@ -1234,24 +1274,24 @@ class CurvesROIPage(ctk.CTkFrame):
         if block.selected_idx is None:
             print(f"[{block.lesion}] Click a point on the graph first to select it")
             return
-        
+
         if len(block.times) <= 3:
             print(f"[{block.lesion}] Cannot remove point - need at least 3 points for fitting")
             return
-        
+
         idx = block.selected_idx
         removed_time = block.times[idx]
         removed_hu = block.values[idx]
-        
+
         # Remove from both arrays (MATLAB: dataArray(idx) = [])
         block.times.pop(idx)
         block.values.pop(idx)
         block.selected_idx = None
         block.lbl_selected.configure(text="Point removed")
-        
+
         # MATLAB: Clear fitted curve when sampled points are modified
         self._clear_fitted_curve(block)
-        
+
         # Redraw sampled curve
         plot_sampled_curve(
             ax=block.ax,
@@ -1260,15 +1300,15 @@ class CurvesROIPage(ctk.CTkFrame):
             lesion_type=block.lesion,
             time_unit="s",
         )
-        
+
         # Re-add the range lines
         self._restore_range_lines(block)
-        
+
         # Sync sliders to new data range
         self._sync_curve_block_from_data(block, block.times, block.values)
-        
+
         block.canvas.draw()
-        
+
         # Update ROI object
         self._update_roi_curve_data(block)
         print(f"[{block.lesion}] Removed point at t={removed_time:.2f}s ({removed_hu:.1f} HU)")
@@ -1289,24 +1329,22 @@ class CurvesROIPage(ctk.CTkFrame):
             self.post_roi.fitted_curve = []
             self.post_roi.fitted_time_points = []
 
-
     def _restore_range_lines(self, block) -> None:
         """
         Re-add the start/end range lines after plot_sampled_curve clears them.
         """
         t_start = int(block.var_start.get())
         t_end = int(block.var_end.get())
-        
+
         # Remove old lines if they exist
         if hasattr(block, 'start_line') and block.start_line in block.ax.lines:
             block.start_line.remove()
         if hasattr(block, 'end_line') and block.end_line in block.ax.lines:
             block.end_line.remove()
-        
+
         # Add new lines
         block.start_line = block.ax.axvline(t_start, color=THEME["accent"], linewidth=2)
         block.end_line = block.ax.axvline(t_end, color=THEME["accent"], linewidth=2)
-
 
     def _update_roi_curve_data(self, block) -> None:
         """
@@ -1319,10 +1357,10 @@ class CurvesROIPage(ctk.CTkFrame):
         elif block.lesion == "post" and self.post_roi:
             self.post_roi.curve = block.values.copy()
             self.post_roi.time_points = block.times.copy()
-        
+
         # Save to JSON
         bundle = {
-            "preRoiObject":  self._roi_to_dict(self.pre_roi),
+            "preRoiObject": self._roi_to_dict(self.pre_roi),
             "postRoiObject": self._roi_to_dict(self.post_roi),
         }
         path = save_roi_as_json(bundle)
@@ -1334,7 +1372,6 @@ class CurvesROIPage(ctk.CTkFrame):
 
     def _inject_test_volume(self) -> None:
         if getattr(self.state, "ctp_volume", None) is None:
-
             vol = make_test_volume()
 
             self.state.ctp_volume = {
@@ -1359,10 +1396,10 @@ class CurvesROIPage(ctk.CTkFrame):
             return {}
         return {
             "x": roi.x, "y": roi.y, "z": roi.z, "t": roi.t,
-            "curve":            roi.curve,
-            "timePoints":       roi.time_points,
-            "fittedCurve":      roi.fitted_curve,
+            "curve": roi.curve,
+            "timePoints": roi.time_points,
+            "fittedCurve": roi.fitted_curve,
             "fittedTimePoints": roi.fitted_time_points,
-            "roiXBoundary":     roi.roi_x_boundary,
-            "roiYBoundary":     roi.roi_y_boundary,
+            "roiXBoundary": roi.roi_x_boundary,
+            "roiYBoundary": roi.roi_y_boundary,
         }

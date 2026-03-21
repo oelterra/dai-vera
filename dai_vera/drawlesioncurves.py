@@ -427,7 +427,7 @@ def get_fitted_curve(
     auc  = compute_auc(fit.fitted_data, fit.stretched_time)
 
     return FittedCurveResult(
-        fitted_curve              = fit.fitted_data,
+        fitted_curve              = fit.fitted_data + baseline_hu_offset,
         fitted_time               = fit.stretched_time,
         baseline_subtracted_curve = baseline_subtracted,
         rmse                      = rmse,
