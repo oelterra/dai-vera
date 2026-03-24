@@ -716,7 +716,7 @@ class ImportCTPage(ctk.CTkFrame):
                 if hasattr(ds, "TemporalPositionIdentifier"):
                     t = int(ds.TemporalPositionIdentifier)
                 elif hasattr(ds, "TriggerTime"):
-                    t = float(ds.TriggerTime)
+                    t = float(ds.TriggerTime) / 1000.0
                 elif hasattr(ds, "AcquisitionTime"):
                     t = float(str(ds.AcquisitionTime).replace(":", "") or 0)
                 elif hasattr(ds, "ContentTime"):
