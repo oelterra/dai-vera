@@ -162,6 +162,9 @@ class CurvesROIPage(ctk.CTkFrame):
         self._movie_after_id: Optional[str] = None
         self._ctp_photo = None
         self._current_drag_lesion: Optional[LesionType] = None
+        self._ctp_zoom = 1.0
+        self._ctp_display_rect: Optional[tuple[float, float, float, float, int, int]] = None
+        self._overlay_image: Optional[np.ndarray] = None
 
         # last search-ROI rectangle in IMAGE pixel space (for redraw on slice change)
         self._last_search_roi_img: Optional[tuple] = None   # (r0,c0,r1,c1)
@@ -207,6 +210,11 @@ class CurvesROIPage(ctk.CTkFrame):
         self.img_canvas = tk.Canvas(img_box, bg="black", highlightthickness=0)
         self.img_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.img_canvas.bind("<Button-1>", self._on_image_click)
+        self.img_canvas.bind("<Configure>", lambda _e: self._render_ctp_image())
+        self.img_canvas.bind("<MouseWheel>", self._on_ctp_zoom_event)
+        self.img_canvas.bind("<Button-4>", self._on_ctp_zoom_event)
+        self.img_canvas.bind("<Button-5>", self._on_ctp_zoom_event)
+        self.img_canvas.bind("<Double-Button-1>", self._reset_ctp_zoom)
 
         self.lbl_ctp_source = ctk.CTkLabel(
             img_box, text="", font=FONTS["body"], text_color=THEME["muted"]
@@ -234,7 +242,14 @@ class CurvesROIPage(ctk.CTkFrame):
         )
         self.slider_ctp_slice.pack(padx=6, pady=(0, 6))
 
-        self.lbl_ctp_slice_val = ctk.CTkLabel(slice_col, text=str(self.var_ctp_slice.get()), font=FONTS["small"])
+        self.lbl_ctp_slice_val = ctk.CTkLabel(
+            slice_col,
+            text=str(self.var_ctp_slice.get()),
+            font=FONTS["small"],
+            width=56,
+            fg_color=THEME["panel_3"],
+            corner_radius=10,
+        )
         self.lbl_ctp_slice_val.pack(pady=(0, 8))
 
         # time (horizontal) slider
@@ -259,7 +274,14 @@ class CurvesROIPage(ctk.CTkFrame):
         )
         self.slider_ctp_time.grid(row=0, column=1, sticky="ew")
 
-        self.lbl_ctp_time_val = ctk.CTkLabel(time_row, text=str(self.var_ctp_time.get()), font=FONTS["small"])
+        self.lbl_ctp_time_val = ctk.CTkLabel(
+            time_row,
+            text=str(self.var_ctp_time.get()),
+            font=FONTS["small"],
+            width=60,
+            fg_color=THEME["panel_3"],
+            corner_radius=10,
+        )
         self.lbl_ctp_time_val.grid(row=0, column=2, sticky="e", padx=(10, 0))
 
     def _build_controls_panel(self) -> None:
@@ -654,9 +676,60 @@ class CurvesROIPage(ctk.CTkFrame):
     # Rendering helpers
     # =========================================================================
 
+    def _on_ctp_zoom_event(self, event):
+        vol = getattr(self.state, "ctp_volume", None)
+        if not vol:
+            return
+
+        delta = getattr(event, "delta", 0)
+        num = getattr(event, "num", None)
+        if delta > 0 or num == 4:
+            factor = 1.1
+        elif delta < 0 or num == 5:
+            factor = 1 / 1.1
+        else:
+            return
+
+        self._ctp_zoom = min(6.0, max(1.0, self._ctp_zoom * factor))
+        if self._overlay_image is not None:
+            self._render_ctp_image_with(self._overlay_image)
+        else:
+            self._render_ctp_image()
+        return "break"
+
+    def _reset_ctp_zoom(self, _event=None):
+        self._ctp_zoom = 1.0
+        if self._overlay_image is not None:
+            self._render_ctp_image_with(self._overlay_image)
+        else:
+            self._render_ctp_image()
+        return "break"
+
+    def _draw_ctp_canvas_image(self, img8: np.ndarray) -> None:
+        cw = max(10, self.img_canvas.winfo_width())
+        ch = max(10, self.img_canvas.winfo_height())
+        pil = Image.fromarray(img8)
+        img_w, img_h = pil.size
+
+        scale = min(cw / max(1, img_w), ch / max(1, img_h))
+        scale *= self._ctp_zoom
+        disp_w = max(1, int(img_w * scale))
+        disp_h = max(1, int(img_h * scale))
+        x0 = (cw - disp_w) / 2.0
+        y0 = (ch - disp_h) / 2.0
+        self._ctp_display_rect = (x0, y0, disp_w, disp_h, img_h, img_w)
+
+        photo = ImageTk.PhotoImage(pil.resize((disp_w, disp_h), Image.Resampling.LANCZOS))
+        self._ctp_photo = photo
+
+        self.img_canvas.delete("all")
+        self.img_canvas.create_image(cw // 2, ch // 2, image=photo, anchor="center")
+        self.lbl_ctp_source.configure(text="")
+
     def _render_ctp_image(self) -> None:
         vol = getattr(self.state, "ctp_volume", None)
         if not vol:
+            self._ctp_display_rect = None
             self.lbl_ctp_source.configure(text="No CTP loaded")
             return
 
@@ -680,16 +753,8 @@ class CurvesROIPage(ctk.CTkFrame):
             length=float(getattr(self.state, "ctp_length", 0.5)),
             width =float(getattr(self.state, "ctp_width",  0.5)),
         )
-
-        cw = max(10, self.img_canvas.winfo_width())
-        ch = max(10, self.img_canvas.winfo_height())
-
-        photo = ImageTk.PhotoImage(Image.fromarray(img8).resize((cw, ch)))
-        self._ctp_photo = photo
-
-        self.img_canvas.delete("all")
-        self.img_canvas.create_image(cw // 2, ch // 2, image=photo, anchor="center")
-        self.lbl_ctp_source.configure(text="")
+        self._overlay_image = None
+        self._draw_ctp_canvas_image(img8)
 
         # redraw the search-ROI rectangle if one exists
         if self._last_search_roi_img is not None:
@@ -697,10 +762,12 @@ class CurvesROIPage(ctk.CTkFrame):
 
     def _image_to_canvas(self, r_img: int, c_img: int, img_h: int, img_w: int) -> tuple[float, float]:
         """Convert image pixel (row, col) → canvas pixel (cx, cy)."""
-        cw = max(1, self.img_canvas.winfo_width())
-        ch = max(1, self.img_canvas.winfo_height())
-        cx = c_img * cw / img_w
-        cy = r_img * ch / img_h
+        rect = self._ctp_display_rect
+        if rect is None:
+            return 0.0, 0.0
+        x0, y0, disp_w, disp_h, _, _ = rect
+        cx = x0 + (c_img * disp_w / max(1, img_w))
+        cy = y0 + (r_img * disp_h / max(1, img_h))
         return cx, cy
 
     def _draw_search_roi_rect(self, r0: int, c0: int, r1: int, c1: int,
@@ -720,12 +787,8 @@ class CurvesROIPage(ctk.CTkFrame):
             length=float(getattr(self.state, "ctp_length", 0.5)),
             width =float(getattr(self.state, "ctp_width",  0.5)),
         )
-        cw = max(10, self.img_canvas.winfo_width())
-        ch = max(10, self.img_canvas.winfo_height())
-        photo = ImageTk.PhotoImage(Image.fromarray(img8).resize((cw, ch)))
-        self._ctp_photo = photo
-        self.img_canvas.delete("all")
-        self.img_canvas.create_image(cw // 2, ch // 2, image=photo, anchor="center")
+        self._overlay_image = image_override
+        self._draw_ctp_canvas_image(img8)
 
     # ── curve redraw (FIXED — keeps tight limits, never resets to -50..500) ──
 
@@ -952,10 +1015,12 @@ class CurvesROIPage(ctk.CTkFrame):
         z_idx = min(max(0, int(self.var_ctp_slice.get()) - 1), Z - 1)
 
         # Canvas coords → image coords
-        cw = max(1, self.img_canvas.winfo_width())
-        ch = max(1, self.img_canvas.winfo_height())
-        click_row = int(self.current_y * H / ch)
-        click_col = int(self.current_x * W / cw)
+        rect = self._ctp_display_rect
+        if rect is None:
+            return
+        x0, y0, disp_w, disp_h, _, _ = rect
+        click_col = int(np.clip((self.current_x - x0) * W / max(1, disp_w), 0, W - 1))
+        click_row = int(np.clip((self.current_y - y0) * H / max(1, disp_h), 0, H - 1))
 
         sample_n  = int(self.var_sample_roi.get().split("x")[0].strip())
         search_n  = int(self.var_search_roi.get().split("x")[0].strip())

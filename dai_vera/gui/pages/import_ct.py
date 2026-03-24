@@ -27,9 +27,9 @@ class ImportCTPage(ctk.CTkFrame):
         self.translation_stage = None  # None / "ctp" / "cta"
         self.pending_ctp_translation_slice = None
 
-        # Root grid: two halves always
-        self.grid_columnconfigure(0, weight=1, uniform="half")
-        self.grid_columnconfigure(1, weight=1, uniform="half")
+        # Give the image side more room while keeping the controls comfortably usable.
+        self.grid_columnconfigure(0, weight=7)
+        self.grid_columnconfigure(1, weight=5)
         self.grid_rowconfigure(0, weight=1)
 
         # Left half (images)
@@ -76,6 +76,8 @@ class ImportCTPage(ctk.CTkFrame):
                 "slice_slider": None,
                 "time_slider": None,
                 "time_row": None,
+                "zoom": 1.0,
+                "display_image_size": None,
             },
             "CTA": {
                 "upload_canvas": None,
@@ -83,6 +85,8 @@ class ImportCTPage(ctk.CTkFrame):
                 "slice_slider": None,
                 "time_slider": None,
                 "time_row": None,
+                "zoom": 1.0,
+                "display_image_size": None,
             },
         }
 
@@ -243,24 +247,24 @@ class ImportCTPage(ctk.CTkFrame):
 
     def _build_image_panel(self, parent, title, kind, folder_var, slice_var, time_var, row: int):
         panel = ctk.CTkFrame(parent, fg_color=THEME["panel_2"], corner_radius=16)
-        panel.grid(row=row, column=0, sticky="nsew", padx=14, pady=(14, 8) if row == 0 else (8, 14))
+        panel.grid(row=row, column=0, sticky="nsew", padx=10, pady=(10, 6) if row == 0 else (6, 10))
         panel.grid_columnconfigure(0, weight=1)
         panel.grid_columnconfigure(1, weight=0)
         panel.grid_rowconfigure(1, weight=1)
         panel.grid_rowconfigure(2, weight=0)
 
         ctk.CTkLabel(panel, text=title, font=FONTS["h1"], text_color=THEME["text"]).grid(
-            row=0, column=0, sticky="w", padx=14, pady=(12, 6)
+            row=0, column=0, sticky="w", padx=14, pady=(12, 4)
         )
 
         content = ctk.CTkFrame(panel, fg_color="transparent")
-        content.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=14, pady=(0, 10))
+        content.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=14, pady=(0, 8))
         content.grid_columnconfigure(0, weight=1)
         content.grid_columnconfigure(1, weight=0)
         content.grid_rowconfigure(0, weight=1)
 
         canvas_wrap = ctk.CTkFrame(content, fg_color=THEME["panel_3"], corner_radius=14)
-        canvas_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        canvas_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         canvas_wrap.grid_rowconfigure(0, weight=1)
         canvas_wrap.grid_columnconfigure(0, weight=1)
 
@@ -273,6 +277,7 @@ class ImportCTPage(ctk.CTkFrame):
         upload_canvas.grid(row=0, column=0, sticky="nsew", padx=14, pady=14)
 
         self._view[kind]["upload_canvas"] = upload_canvas
+        self._bind_zoom_events(upload_canvas, kind)
 
         def on_canvas_configure(_evt=None):
             vol = self.state.ctp_volume if kind == "CTP" else self.state.cta_volume
@@ -282,7 +287,8 @@ class ImportCTPage(ctk.CTkFrame):
                 self._draw_upload_placeholder(kind)
 
         upload_canvas.bind("<Configure>", on_canvas_configure)
-        upload_canvas.bind("<Button-1>", lambda e: self._select_folder_for(kind))
+        upload_canvas.bind("<Button-1>", lambda e, view_kind=kind: self._on_canvas_click(view_kind))
+        upload_canvas.bind("<Double-Button-1>", lambda e, view_kind=kind: self._reset_zoom(view_kind))
 
         slice_col = ctk.CTkFrame(content, fg_color="transparent")
         slice_col.grid(row=0, column=1, sticky="ns")
@@ -309,7 +315,14 @@ class ImportCTPage(ctk.CTkFrame):
         self._view[kind]["slice_slider"] = slice_slider
 
         slice_val = ctk.CTkLabel(
-            slice_col, text=str(slice_var.get()), text_color=THEME["text"], font=FONTS["small"]
+            slice_col,
+            text=str(slice_var.get()),
+            text_color=THEME["text"],
+            font=FONTS["small"],
+            width=56,
+            fg_color=THEME["panel_3"],
+            corner_radius=10,
+            anchor="center",
         )
         slice_val.pack(pady=(0, 8))
 
@@ -326,8 +339,9 @@ class ImportCTPage(ctk.CTkFrame):
         on_slice_change()
 
         bottom = ctk.CTkFrame(panel, fg_color="transparent")
-        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 14))
+        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 12))
         bottom.grid_columnconfigure(1, weight=1)
+        bottom.grid_columnconfigure(2, minsize=72)
         self._view[kind]["time_row"] = bottom
 
         ctk.CTkLabel(bottom, text="Time Points", text_color=THEME["muted"], font=FONTS["small"]).grid(
@@ -350,7 +364,14 @@ class ImportCTPage(ctk.CTkFrame):
         self._view[kind]["time_slider"] = time_slider
 
         time_val = ctk.CTkLabel(
-            bottom, text=str(time_var.get()), text_color=THEME["text"], font=FONTS["small"]
+            bottom,
+            text=str(time_var.get()),
+            text_color=THEME["text"],
+            font=FONTS["small"],
+            width=60,
+            fg_color=THEME["panel_3"],
+            corner_radius=10,
+            anchor="center",
         )
         time_val.grid(row=0, column=2, sticky="e", padx=(10, 0))
 
@@ -374,6 +395,7 @@ class ImportCTPage(ctk.CTkFrame):
         if upload_canvas is None:
             return
 
+        self._view[kind]["display_image_size"] = None
         upload_canvas.delete("all")
         w = max(10, upload_canvas.winfo_width())
         h = max(10, upload_canvas.winfo_height())
@@ -392,6 +414,41 @@ class ImportCTPage(ctk.CTkFrame):
             fill=THEME["text"],
             font=("Helvetica", 13),
         )
+
+    def _bind_zoom_events(self, canvas: tk.Canvas, kind: str):
+        canvas.bind("<MouseWheel>", lambda e, view_kind=kind: self._on_zoom_event(view_kind, e))
+        canvas.bind("<Button-4>", lambda e, view_kind=kind: self._on_zoom_event(view_kind, e))
+        canvas.bind("<Button-5>", lambda e, view_kind=kind: self._on_zoom_event(view_kind, e))
+
+    def _on_canvas_click(self, kind: str):
+        vol = self.state.ctp_volume if kind == "CTP" else self.state.cta_volume
+        if not vol:
+            self._select_folder_for(kind)
+
+    def _on_zoom_event(self, kind: str, event):
+        vol = self.state.ctp_volume if kind == "CTP" else self.state.cta_volume
+        if not vol:
+            return
+
+        delta = getattr(event, "delta", 0)
+        num = getattr(event, "num", None)
+        if delta > 0 or num == 4:
+            factor = 1.1
+        elif delta < 0 or num == 5:
+            factor = 1 / 1.1
+        else:
+            return
+
+        self._view[kind]["zoom"] = min(6.0, max(1.0, self._view[kind]["zoom"] * factor))
+        self._render_current(kind)
+        return "break"
+
+    def _reset_zoom(self, kind: str):
+        self._view[kind]["zoom"] = 1.0
+        vol = self.state.ctp_volume if kind == "CTP" else self.state.cta_volume
+        if vol:
+            self._render_current(kind)
+        return "break"
 
     # ---------------- Right: Parameters ----------------
     def _build_parameters_panel(self):
@@ -476,6 +533,24 @@ class ImportCTPage(ctk.CTkFrame):
         self.btn_cta_thickness.grid(row=0, column=1, sticky="ew", padx=(8, 0))
         r += 1
 
+        self.lbl_ctp_thickness = ctk.CTkLabel(
+            self.image_options_box,
+            text="Current CTP Slice Thickness: 1.0 mm",
+            font=FONTS["body"],
+            text_color=THEME["text"],
+        )
+        self.lbl_ctp_thickness.grid(row=r, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 4))
+        r += 1
+
+        self.lbl_cta_thickness = ctk.CTkLabel(
+            self.image_options_box,
+            text="Current CTA Slice Thickness: 1.0 mm",
+            font=FONTS["body"],
+            text_color=THEME["text"],
+        )
+        self.lbl_cta_thickness.grid(row=r, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 12))
+        r += 1
+
         # Translation section
         ctk.CTkLabel(self.image_options_box, text="Set Translations", font=FONTS["h2"], text_color=THEME["text"]).grid(
             row=r, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 8)
@@ -552,37 +627,16 @@ class ImportCTPage(ctk.CTkFrame):
         row = self._form_entry(self.input_params_box, "Contrast Concentration", self.param_contrast_concentration, row)
         row = self._form_entry(self.input_params_box, "Contrast Volume (mL)", self.param_contrast_volume_ml, row)
         row = self._form_entry(self.input_params_box, "Arterial Blood Pressure (mmHg)", self.param_abp_mmhg, row)
-
-        self.bottom_buttons = ctk.CTkFrame(wrap, fg_color="transparent")
-        self.bottom_buttons.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 14))
-        self.bottom_buttons.grid_columnconfigure(0, weight=1)
-        self.bottom_buttons.grid_columnconfigure(1, weight=1)
-
-        self.btn_clear = ctk.CTkButton(
-            self.bottom_buttons,
-            text="Clear",
-            height=40,
-            corner_radius=12,
-            fg_color=THEME["accent"],
-            hover_color=THEME["accent_2"],
-            text_color="black",
-            command=self._on_clear
-        )
-        self.btn_clear.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-
-        self.btn_compute = ctk.CTkButton(
-            self.bottom_buttons,
-            text="Compute",
-            height=40,
-            corner_radius=12,
-            fg_color=THEME["accent"],
-            hover_color=THEME["accent_2"],
-            text_color="black",
-            command=self._on_compute
-        )
-        self.btn_compute.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-
+        self._update_slice_thickness_labels()
         self._refresh_translation_buttons()
+
+    def _update_slice_thickness_labels(self):
+        self.lbl_ctp_thickness.configure(
+            text=f"Current CTP Slice Thickness: {float(getattr(self.state, 'ctp_slice_thickness_mm', 1.0)):.1f} mm"
+        )
+        self.lbl_cta_thickness.configure(
+            text=f"Current CTA Slice Thickness: {float(getattr(self.state, 'cta_slice_thickness_mm', 1.0)):.1f} mm"
+        )
 
     def _slider_row(self, parent, label, var, row):
         parent.grid_columnconfigure(1, weight=1)
@@ -692,7 +746,9 @@ class ImportCTPage(ctk.CTkFrame):
             if vol.get("slice_thickness") is not None:
                 self.state.cta_slice_thickness = float(vol["slice_thickness"])
 
+        self._view[kind]["zoom"] = 1.0
         self._configure_sliders_from_volume(kind, vol)
+        self._update_slice_thickness_labels()
         self.after(10, lambda: self._render_current(kind))
 
     def _load_dicom_ctp(self, folder: str) -> dict:
@@ -945,9 +1001,11 @@ class ImportCTPage(ctk.CTkFrame):
 
         iw, ih = pil.size
         scale = min(cw / max(1, iw), ch / max(1, ih))
+        scale *= float(self._view[kind]["zoom"])
         new_w = max(1, int(iw * scale))
         new_h = max(1, int(ih * scale))
         pil = pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        self._view[kind]["display_image_size"] = (new_w, new_h)
 
         photo = ImageTk.PhotoImage(pil)
         self._view[kind]["photo"] = photo
@@ -991,6 +1049,7 @@ class ImportCTPage(ctk.CTkFrame):
         else:
             self._draw_upload_placeholder("CTA")
 
+        self._update_slice_thickness_labels()
         self._refresh_translation_buttons()
 
     # ---------------- Slice Thickness ----------------
@@ -1042,6 +1101,8 @@ class ImportCTPage(ctk.CTkFrame):
             self.state.cta_time = 1
             self._configure_sliders_from_volume("CTA", new_vol)
             self._render_current("CTA")
+
+        self._update_slice_thickness_labels()
 
     def _resample_volume_slice_thickness(self, vol: dict, current_thickness: float, desired_thickness: float) -> dict:
         pixels = vol["pixels"]
@@ -1218,11 +1279,16 @@ class ImportCTPage(ctk.CTkFrame):
         self.state.ctp_time = 1
         self.state.cta_slice = 1
         self.state.cta_time = 1
+        self.state.ctp_slice_thickness = 1.0
+        self.state.cta_slice_thickness = 1.0
 
         self.translation_mode = False
         self.translation_stage = None
         self.pending_ctp_translation_slice = None
+        self._view["CTP"]["zoom"] = 1.0
+        self._view["CTA"]["zoom"] = 1.0
         self._refresh_translation_buttons()
+        self._update_slice_thickness_labels()
 
         self._draw_upload_placeholder("CTP")
         self._draw_upload_placeholder("CTA")

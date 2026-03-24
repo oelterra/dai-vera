@@ -53,6 +53,22 @@ class AppState:
     selected_ctp_slice: Optional[int] = None
     selected_cta_slice: Optional[int] = None
 
+    @property
+    def ctp_slice_thickness(self) -> float:
+        return self.ctp_slice_thickness_mm
+
+    @ctp_slice_thickness.setter
+    def ctp_slice_thickness(self, value: float) -> None:
+        self.ctp_slice_thickness_mm = float(value)
+
+    @property
+    def cta_slice_thickness(self) -> float:
+        return self.cta_slice_thickness_mm
+
+    @cta_slice_thickness.setter
+    def cta_slice_thickness(self, value: float) -> None:
+        self.cta_slice_thickness_mm = float(value)
+
     def set_pre_lesion(self, x: int, y: int, z: int) -> ROI:
 
         if self.ctp_image_4d is None:
