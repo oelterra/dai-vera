@@ -11,19 +11,19 @@ class VesselAnalysisPage(ctk.CTkFrame):
         self.state = app_state
 
         # ---------- responsive 2-column layout ----------
-        self.grid_columnconfigure(0, weight=1, uniform="half")
-        self.grid_columnconfigure(1, weight=1, uniform="half")
+        self.grid_columnconfigure(0, weight=5)
+        self.grid_columnconfigure(1, weight=7)
         self.grid_rowconfigure(0, weight=1)
 
         # ---------- LEFT ----------
         left = ctk.CTkFrame(self, fg_color=THEME["panel"], corner_radius=18)
-        left.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=12)
+        left.grid(row=0, column=0, sticky="nsew", padx=(8, 5), pady=8)
         left.grid_columnconfigure(0, weight=1)
         left.grid_rowconfigure(2, weight=1)
 
         # Input Parameters box (top)
         params = ctk.CTkFrame(left, fg_color=THEME["panel_2"], corner_radius=16)
-        params.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 12))
+        params.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 10))
         params.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(params, text="Input Parameters", font=FONTS["h1"]).grid(
@@ -56,7 +56,7 @@ class VesselAnalysisPage(ctk.CTkFrame):
 
         # Buttons (stack)
         btns = ctk.CTkFrame(left, fg_color="transparent")
-        btns.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
+        btns.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
         btns.grid_columnconfigure(0, weight=1)
 
         self.selected_view = ctk.StringVar(value="stenosis")
@@ -102,17 +102,17 @@ class VesselAnalysisPage(ctk.CTkFrame):
 
         # ---------- RIGHT ----------
         right = ctk.CTkFrame(self, fg_color=THEME["panel"], corner_radius=18)
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=12)
+        right.grid(row=0, column=1, sticky="nsew", padx=(5, 8), pady=8)
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(1, weight=1)
 
         # Title updates based on selected button
         self.right_title = ctk.CTkLabel(right, text="Mark Stenosis", font=FONTS["h1"])
-        self.right_title.grid(row=0, column=0, sticky="w", padx=18, pady=(18, 10))
+        self.right_title.grid(row=0, column=0, sticky="w", padx=16, pady=(14, 8))
 
         # Empty content area for now
         self.right_body = ctk.CTkFrame(right, fg_color=THEME["panel_2"], corner_radius=16)
-        self.right_body.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
+        self.right_body.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
 
         self._apply_button_styles()
 

@@ -132,28 +132,32 @@ class CurvesROIPage(ctk.CTkFrame):
         super().__init__(master, fg_color=THEME["bg"])
         self.state = app_state
 
-        self.grid_columnconfigure(0, weight=1, uniform="half")
-        self.grid_columnconfigure(1, weight=1, uniform="half")
+        self.grid_columnconfigure(0, weight=7)
+        self.grid_columnconfigure(1, weight=4)
         self.grid_rowconfigure(0, weight=1)
 
         # ── layout panels ─────────────────────────────────────────────────────
         self.left_outer = ctk.CTkFrame(self, fg_color=THEME["panel"], corner_radius=18)
-        self.left_outer.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=12)
+        self.left_outer.grid(row=0, column=0, sticky="nsew", padx=(8, 5), pady=8)
         self.left_outer.grid_rowconfigure(0, weight=1)
         self.left_outer.grid_columnconfigure(0, weight=1)
 
-        self.left = ctk.CTkScrollableFrame(self.left_outer, fg_color="transparent")
+        self.left = ctk.CTkFrame(self.left_outer, fg_color="transparent")
         self.left.grid(row=0, column=0, sticky="nsew")
         self.left.grid_columnconfigure(0, weight=1)
+        self.left.grid_rowconfigure(0, weight=5)
+        self.left.grid_rowconfigure(1, weight=2)
 
         self.right_outer = ctk.CTkFrame(self, fg_color=THEME["panel"], corner_radius=18)
-        self.right_outer.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=12)
+        self.right_outer.grid(row=0, column=1, sticky="nsew", padx=(5, 8), pady=8)
         self.right_outer.grid_rowconfigure(0, weight=1)
         self.right_outer.grid_columnconfigure(0, weight=1)
 
-        self.right = ctk.CTkScrollableFrame(self.right_outer, fg_color="transparent")
+        self.right = ctk.CTkFrame(self.right_outer, fg_color="transparent")
         self.right.grid(row=0, column=0, sticky="nsew")
         self.right.grid_columnconfigure(0, weight=1)
+        self.right.grid_rowconfigure(0, weight=1)
+        self.right.grid_rowconfigure(1, weight=1)
 
         # ── internal state ────────────────────────────────────────────────────
         self.current_x: Optional[int] = None
@@ -165,6 +169,11 @@ class CurvesROIPage(ctk.CTkFrame):
         self._ctp_zoom = 1.0
         self._ctp_display_rect: Optional[tuple[float, float, float, float, int, int]] = None
         self._overlay_image: Optional[np.ndarray] = None
+        self._ctp_pan_x = 0.0
+        self._ctp_pan_y = 0.0
+        self._ctp_drag_origin: Optional[tuple[int, int]] = None
+        self._ctp_drag_pan_start: Optional[tuple[float, float]] = None
+        self._ctp_was_dragged = False
 
         # last search-ROI rectangle in IMAGE pixel space (for redraw on slice change)
         self._last_search_roi_img: Optional[tuple] = None   # (r0,c0,r1,c1)
@@ -190,26 +199,32 @@ class CurvesROIPage(ctk.CTkFrame):
 
     def _build_ctp_panel(self) -> None:
         self.ctp_panel = ctk.CTkFrame(self.left, fg_color=THEME["panel_2"], corner_radius=16)
-        self.ctp_panel.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 10))
+        self.ctp_panel.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 6))
         self.ctp_panel.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(self.ctp_panel, text="CTP Images", font=FONTS["h1"]).grid(
-            row=0, column=0, sticky="w", padx=14, pady=(12, 8)
-        )
+        self.ctp_panel.grid_rowconfigure(1, weight=1)
 
         content = ctk.CTkFrame(self.ctp_panel, fg_color="transparent")
-        content.grid(row=1, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 10))
-        content.grid_columnconfigure(0, weight=1)
-        content.grid_columnconfigure(1, weight=0)
+        content.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 2))
+        content.grid_columnconfigure(0, weight=0)
+        content.grid_columnconfigure(1, weight=1)
+        content.grid_columnconfigure(2, weight=0)
+        content.grid_rowconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            content,
+            text="CTP\nImages",
+            font=FONTS["h2"],
+            text_color=THEME["text"],
+            justify="left",
+            anchor="nw",
+        ).grid(row=0, column=0, sticky="nw", padx=(0, 10), pady=(2, 0))
 
         # image canvas
-        img_box = ctk.CTkFrame(content, fg_color=THEME["panel_3"], corner_radius=14, height=280)
-        img_box.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        img_box.grid_propagate(False)
-
-        self.img_canvas = tk.Canvas(img_box, bg="black", highlightthickness=0)
-        self.img_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self.img_canvas.bind("<Button-1>", self._on_image_click)
+        self.img_canvas = tk.Canvas(content, bg=THEME["panel_3"], highlightthickness=0)
+        self.img_canvas.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
+        self.img_canvas.bind("<ButtonPress-1>", self._on_ctp_canvas_press)
+        self.img_canvas.bind("<B1-Motion>", self._on_ctp_canvas_drag)
+        self.img_canvas.bind("<ButtonRelease-1>", self._on_ctp_canvas_release)
         self.img_canvas.bind("<Configure>", lambda _e: self._render_ctp_image())
         self.img_canvas.bind("<MouseWheel>", self._on_ctp_zoom_event)
         self.img_canvas.bind("<Button-4>", self._on_ctp_zoom_event)
@@ -217,15 +232,25 @@ class CurvesROIPage(ctk.CTkFrame):
         self.img_canvas.bind("<Double-Button-1>", self._reset_ctp_zoom)
 
         self.lbl_ctp_source = ctk.CTkLabel(
-            img_box, text="", font=FONTS["body"], text_color=THEME["muted"]
+            content, text="", font=FONTS["body"], text_color=THEME["muted"]
         )
-        self.lbl_ctp_source.place(relx=0.5, rely=0.5, anchor="center")
+        self.lbl_ctp_source.place(in_=self.img_canvas, relx=0.5, rely=0.5, anchor="center")
 
         # slice (vertical) slider
         slice_col = ctk.CTkFrame(content, fg_color="transparent")
-        slice_col.grid(row=0, column=1, sticky="ns")
+        slice_col.grid(row=0, column=2, sticky="ns")
 
         ctk.CTkLabel(slice_col, text="Slice", text_color=THEME["muted"], font=FONTS["small"]).pack(pady=(6, 6))
+
+        self.lbl_ctp_slice_val = ctk.CTkLabel(
+            slice_col,
+            text=str(int(self.state.ctp_slice)),
+            font=FONTS["small"],
+            width=56,
+            fg_color=THEME["panel_3"],
+            corner_radius=10,
+        )
+        self.lbl_ctp_slice_val.pack(pady=(0, 8))
 
         self.var_ctp_slice = ctk.IntVar(value=int(self.state.ctp_slice))
         self.slider_ctp_slice = ctk.CTkSlider(
@@ -237,25 +262,16 @@ class CurvesROIPage(ctk.CTkFrame):
             progress_color=THEME["accent"],
             button_color=THEME["accent"],
             button_hover_color=THEME["accent_2"],
-            height=220,
+            height=300,
             command=self._on_ctp_slice_change,
         )
-        self.slider_ctp_slice.pack(padx=6, pady=(0, 6))
-
-        self.lbl_ctp_slice_val = ctk.CTkLabel(
-            slice_col,
-            text=str(self.var_ctp_slice.get()),
-            font=FONTS["small"],
-            width=56,
-            fg_color=THEME["panel_3"],
-            corner_radius=10,
-        )
-        self.lbl_ctp_slice_val.pack(pady=(0, 8))
+        self.slider_ctp_slice.pack(padx=6, pady=(0, 6), fill="y", expand=True)
 
         # time (horizontal) slider
         time_row = ctk.CTkFrame(self.ctp_panel, fg_color="transparent")
-        time_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 14))
+        time_row.grid(row=1, column=0, sticky="ew", padx=12, pady=(14, 8))
         time_row.grid_columnconfigure(1, weight=1)
+        time_row.grid_columnconfigure(2, minsize=72)
 
         ctk.CTkLabel(time_row, text="Time Points", text_color=THEME["muted"], font=FONTS["small"]).grid(
             row=0, column=0, sticky="w", padx=(0, 10)
@@ -284,14 +300,17 @@ class CurvesROIPage(ctk.CTkFrame):
         )
         self.lbl_ctp_time_val.grid(row=0, column=2, sticky="e", padx=(10, 0))
 
+        content.bind("<Configure>", lambda _event: self._update_ctp_image_size())
+        self.after(40, self._update_ctp_image_size)
+
     def _build_controls_panel(self) -> None:
         self.controls = ctk.CTkFrame(self.left, fg_color=THEME["panel_2"], corner_radius=16)
-        self.controls.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
+        self.controls.grid(row=1, column=0, sticky="nsew", padx=10, pady=(2, 10))
         self.controls.grid_columnconfigure(0, weight=1)
 
         # row 0 — Sample ROI / Search ROI
         row1 = ctk.CTkFrame(self.controls, fg_color="transparent")
-        row1.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 8))
+        row1.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
         row1.grid_columnconfigure(1, weight=1)
         row1.grid_columnconfigure(3, weight=1)
 
@@ -306,7 +325,7 @@ class CurvesROIPage(ctk.CTkFrame):
             button_hover_color=THEME["border_2"],
             dropdown_fg_color=THEME["panel_2"],
             dropdown_hover_color=THEME["border"],
-            height=34,
+            height=32,
         ).grid(row=0, column=1, sticky="ew")
 
         ctk.CTkLabel(row1, text="Search ROI", font=FONTS["body"]).grid(row=0, column=2, sticky="w", padx=(18, 10))
@@ -320,12 +339,12 @@ class CurvesROIPage(ctk.CTkFrame):
             button_hover_color=THEME["border_2"],
             dropdown_fg_color=THEME["panel_2"],
             dropdown_hover_color=THEME["border"],
-            height=34,
+            height=32,
         ).grid(row=0, column=3, sticky="ew")
 
         # row 1 — Interpolate
         row2 = ctk.CTkFrame(self.controls, fg_color="transparent")
-        row2.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
+        row2.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
         row2.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(row2, text="Interpolate Current Slice", font=FONTS["body"]).grid(row=0, column=0, sticky="w")
@@ -339,7 +358,7 @@ class CurvesROIPage(ctk.CTkFrame):
             button_hover_color=THEME["border_2"],
             dropdown_fg_color=THEME["panel_2"],
             dropdown_hover_color=THEME["border"],
-            height=34,
+            height=32,
         ).grid(row=0, column=1, sticky="ew", padx=(12, 0))
 
         # rows 2-3 — L / W
@@ -350,34 +369,34 @@ class CurvesROIPage(ctk.CTkFrame):
 
         # row 4 — Set pre/post lesion
         row3 = ctk.CTkFrame(self.controls, fg_color="transparent")
-        row3.grid(row=4, column=0, sticky="ew", padx=14, pady=(10, 8))
+        row3.grid(row=4, column=0, sticky="ew", padx=12, pady=(8, 6))
         row3.grid_columnconfigure(0, weight=1)
         row3.grid_columnconfigure(1, weight=1)
 
         ctk.CTkButton(
             row3, text="Set Pre Lesion",
             fg_color=THEME["panel_3"], hover_color=THEME["border_2"],
-            height=36, corner_radius=12,
+            height=34, corner_radius=12,
             command=lambda: self._on_set_lesion("pre"),
         ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
         ctk.CTkButton(
             row3, text="Set Post Lesion",
             fg_color=THEME["panel_3"], hover_color=THEME["border_2"],
-            height=36, corner_radius=12,
+            height=34, corner_radius=12,
             command=lambda: self._on_set_lesion("post"),
         ).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         # row 5 — Play / speed / height-positive
         row4 = ctk.CTkFrame(self.controls, fg_color="transparent")
-        row4.grid(row=5, column=0, sticky="ew", padx=14, pady=(0, 14))
+        row4.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 10))
         row4.grid_columnconfigure(1, weight=1)
 
         self.btn_play = ctk.CTkButton(
             row4, text="Play Movie",
             fg_color=THEME["accent"], hover_color=THEME["accent_2"],
             text_color="black",
-            height=36, corner_radius=12,
+            height=34, corner_radius=12,
             command=self._toggle_movie,
         )
         self.btn_play.grid(row=0, column=0, sticky="w")
@@ -392,7 +411,7 @@ class CurvesROIPage(ctk.CTkFrame):
             button_hover_color=THEME["border_2"],
             dropdown_fg_color=THEME["panel_2"],
             dropdown_hover_color=THEME["border"],
-            height=34, width=120,
+            height=32, width=108,
         ).grid(row=0, column=1, sticky="w", padx=(12, 0))
 
         self.var_height_positive = ctk.BooleanVar(value=False)
@@ -407,7 +426,7 @@ class CurvesROIPage(ctk.CTkFrame):
 
     def _build_slider_line(self, parent, label: str, var: ctk.DoubleVar, row: int) -> None:
         line = ctk.CTkFrame(parent, fg_color="transparent")
-        line.grid(row=row, column=0, sticky="ew", padx=14, pady=6)
+        line.grid(row=row, column=0, sticky="ew", padx=12, pady=4)
         line.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(line, text=label, font=FONTS["body"]).grid(row=0, column=0, sticky="w", padx=(0, 10))
@@ -419,6 +438,19 @@ class CurvesROIPage(ctk.CTkFrame):
             button_hover_color=THEME["accent_2"],
             command=lambda _=None: self._sync_window_to_state(),
         ).grid(row=0, column=1, sticky="ew")
+
+    def _update_ctp_image_size(self) -> None:
+        parent = self.img_canvas.master
+        if parent is None:
+            return
+
+        parent.update_idletasks()
+        total_w = max(1, parent.winfo_width())
+        total_h = max(1, parent.winfo_height())
+        title_w = 58
+        slider_w = 78
+        target = min(max(260, total_w - title_w - slider_w - 18), max(260, total_h + 16))
+        self.img_canvas.configure(width=target, height=target)
 
     # =========================================================================
     # RIGHT PANEL — curve blocks
@@ -433,15 +465,15 @@ class CurvesROIPage(ctk.CTkFrame):
 
         block = ctk.CTkFrame(parent, fg_color=THEME["panel_2"], corner_radius=16)
         block.grid(
-            row=row, column=0, sticky="ew", padx=14,
-            pady=(14, 10) if row == 0 else (0, 14),
+            row=row, column=0, sticky="nsew", padx=12,
+            pady=(12, 6) if row == 0 else (6, 12),
         )
         block.grid_columnconfigure(0, weight=1)
         block.grid_rowconfigure(1, weight=1)
 
         # header
         header = ctk.CTkFrame(block, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 8))
+        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
         header.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(header, text=title, font=FONTS["h1"]).grid(row=0, column=0, sticky="w")
@@ -462,7 +494,7 @@ class CurvesROIPage(ctk.CTkFrame):
         ).pack(side="left")
 
         # matplotlib figure
-        fig = Figure(figsize=(6, 4), dpi=100)
+        fig = Figure(figsize=(6, 3.2), dpi=100)
         ax  = fig.add_subplot(111)
         ax.set_facecolor("black")
         fig.patch.set_facecolor("black")
@@ -490,7 +522,7 @@ class CurvesROIPage(ctk.CTkFrame):
         canvas = FigureCanvasTkAgg(fig, master=block)
         w = canvas.get_tk_widget()
         w.configure(bg="black", highlightthickness=0)
-        w.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 10))
+        w.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
         block.canvas = canvas
 
         canvas.mpl_connect("button_press_event",
@@ -498,7 +530,7 @@ class CurvesROIPage(ctk.CTkFrame):
 
         # ── Start / End range sliders ──────────────────────────────────────
         controls = ctk.CTkFrame(block, fg_color="transparent")
-        controls.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 6))
+        controls.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 4))
         controls.grid_columnconfigure(1, weight=1)
         controls.grid_columnconfigure(3, weight=1)
 
@@ -526,7 +558,7 @@ class CurvesROIPage(ctk.CTkFrame):
 
         # ── Baseline / Washout entries + Fit Curve ────────────────────────
         fit_row = ctk.CTkFrame(block, fg_color="transparent")
-        fit_row.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 6))
+        fit_row.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 4))
 
         ctk.CTkLabel(fit_row, text="Baseline", text_color=THEME["muted"],
                      font=FONTS["small"]).pack(side="left")
@@ -557,7 +589,7 @@ class CurvesROIPage(ctk.CTkFrame):
 
         # ── Edit Point / Remove Point ──────────────────────────────────────
         point_row = ctk.CTkFrame(block, fg_color="transparent")
-        point_row.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 14))
+        point_row.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
 
         ctk.CTkButton(
             point_row, text="Edit Point",
@@ -699,11 +731,44 @@ class CurvesROIPage(ctk.CTkFrame):
 
     def _reset_ctp_zoom(self, _event=None):
         self._ctp_zoom = 1.0
+        self._ctp_pan_x = 0.0
+        self._ctp_pan_y = 0.0
         if self._overlay_image is not None:
             self._render_ctp_image_with(self._overlay_image)
         else:
             self._render_ctp_image()
         return "break"
+
+    def _on_ctp_canvas_press(self, event) -> None:
+        self._ctp_drag_origin = (event.x, event.y)
+        self._ctp_drag_pan_start = (self._ctp_pan_x, self._ctp_pan_y)
+        self._ctp_was_dragged = False
+
+    def _on_ctp_canvas_drag(self, event) -> None:
+        vol = getattr(self.state, "ctp_volume", None)
+        if not vol or self._ctp_zoom <= 1.0 or self._ctp_drag_origin is None or self._ctp_drag_pan_start is None:
+            return
+
+        start_x, start_y = self._ctp_drag_origin
+        pan_start_x, pan_start_y = self._ctp_drag_pan_start
+        dx = event.x - start_x
+        dy = event.y - start_y
+        if abs(dx) > 2 or abs(dy) > 2:
+            self._ctp_was_dragged = True
+        self._ctp_pan_x = pan_start_x + dx
+        self._ctp_pan_y = pan_start_y + dy
+        if self._overlay_image is not None:
+            self._render_ctp_image_with(self._overlay_image)
+        else:
+            self._render_ctp_image()
+
+    def _on_ctp_canvas_release(self, event) -> None:
+        dragged = self._ctp_was_dragged
+        self._ctp_drag_origin = None
+        self._ctp_drag_pan_start = None
+        self._ctp_was_dragged = False
+        if not dragged:
+            self._on_image_click(event)
 
     def _draw_ctp_canvas_image(self, img8: np.ndarray) -> None:
         cw = max(10, self.img_canvas.winfo_width())
@@ -715,15 +780,21 @@ class CurvesROIPage(ctk.CTkFrame):
         scale *= self._ctp_zoom
         disp_w = max(1, int(img_w * scale))
         disp_h = max(1, int(img_h * scale))
-        x0 = (cw - disp_w) / 2.0
-        y0 = (ch - disp_h) / 2.0
+        max_pan_x = max(0.0, (disp_w - cw) / 2.0)
+        max_pan_y = max(0.0, (disp_h - ch) / 2.0)
+        self._ctp_pan_x = float(np.clip(self._ctp_pan_x, -max_pan_x, max_pan_x))
+        self._ctp_pan_y = float(np.clip(self._ctp_pan_y, -max_pan_y, max_pan_y))
+        center_x = (cw / 2.0) + self._ctp_pan_x
+        center_y = (ch / 2.0) + self._ctp_pan_y
+        x0 = center_x - (disp_w / 2.0)
+        y0 = center_y - (disp_h / 2.0)
         self._ctp_display_rect = (x0, y0, disp_w, disp_h, img_h, img_w)
 
         photo = ImageTk.PhotoImage(pil.resize((disp_w, disp_h), Image.Resampling.LANCZOS))
         self._ctp_photo = photo
 
         self.img_canvas.delete("all")
-        self.img_canvas.create_image(cw // 2, ch // 2, image=photo, anchor="center")
+        self.img_canvas.create_image(center_x, center_y, image=photo, anchor="center")
         self.lbl_ctp_source.configure(text="")
 
     def _render_ctp_image(self) -> None:

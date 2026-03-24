@@ -13,24 +13,24 @@ class FFRResultsPage(ctk.CTkFrame):
         self.state = app_state
 
         # 2 columns, right narrower
-        self.grid_columnconfigure(0, weight=3, uniform="main")
-        self.grid_columnconfigure(1, weight=2, uniform="main")
+        self.grid_columnconfigure(0, weight=7)
+        self.grid_columnconfigure(1, weight=4)
         self.grid_rowconfigure(0, weight=1)
 
         # ---------------- LEFT: Graph panel ----------------
         left = ctk.CTkFrame(self, fg_color=THEME["panel"], corner_radius=18)
-        left.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=12)
+        left.grid(row=0, column=0, sticky="nsew", padx=(8, 5), pady=8)
         left.grid_columnconfigure(0, weight=1)
         left.grid_rowconfigure(1, weight=1)
 
         graph_block = ctk.CTkFrame(left, fg_color=THEME["panel_2"], corner_radius=16)
-        graph_block.grid(row=0, column=0, sticky="nsew", padx=14, pady=14)
+        graph_block.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
         graph_block.grid_columnconfigure(0, weight=1)
         graph_block.grid_rowconfigure(2, weight=1)
 
         # Header
         header = ctk.CTkFrame(graph_block, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 6))
+        header.grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 4))
         header.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(header, text="FFR/Flow Velocity Graph", font=FONTS["h1"]).grid(
@@ -48,11 +48,11 @@ class FFRResultsPage(ctk.CTkFrame):
             text_color="black",
             command=self._on_clear_graph,
         )
-        self.btn_graph_clear.grid(row=1, column=0, sticky="w", padx=14, pady=(0, 8))
+        self.btn_graph_clear.grid(row=1, column=0, sticky="w", padx=14, pady=(0, 6))
 
         # Options row
         opts = ctk.CTkFrame(graph_block, fg_color="transparent")
-        opts.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
+        opts.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 6))
         opts.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(opts, text="Graph Appearance", font=FONTS["body"]).grid(
@@ -116,20 +116,20 @@ class FFRResultsPage(ctk.CTkFrame):
         self.canvas = FigureCanvasTkAgg(fig, master=graph_block)
         w = self.canvas.get_tk_widget()
         w.configure(bg="black", highlightthickness=0)
-        w.grid(row=2, column=0, sticky="nsew", padx=14, pady=(0, 14))
+        w.grid(row=2, column=0, sticky="nsew", padx=14, pady=(0, 12))
 
         self._draw_placeholder_graph()
 
         # ---------------- RIGHT: Outputs + Save/Export ----------------
         right = ctk.CTkFrame(self, fg_color=THEME["panel"], corner_radius=18)
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=12)
+        right.grid(row=0, column=1, sticky="nsew", padx=(5, 8), pady=8)
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(0, weight=1)
         right.grid_rowconfigure(1, weight=0)
 
         # Output Parameters box
         out_box = ctk.CTkFrame(right, fg_color=THEME["panel_2"], corner_radius=16)
-        out_box.grid(row=0, column=0, sticky="nsew", padx=14, pady=(14, 10))
+        out_box.grid(row=0, column=0, sticky="nsew", padx=12, pady=(12, 8))
         out_box.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(out_box, text="Output Parameters", font=FONTS["h1"]).grid(
@@ -157,7 +157,7 @@ class FFRResultsPage(ctk.CTkFrame):
 
         # Save/Export box
         se_box = ctk.CTkFrame(right, fg_color=THEME["panel_2"], corner_radius=16)
-        se_box.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
+        se_box.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
         se_box.grid_columnconfigure(0, weight=1)
         se_box.grid_columnconfigure(1, weight=1)
 

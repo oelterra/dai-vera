@@ -1,7 +1,7 @@
 import customtkinter as ctk
 
 from dai_vera.gui.theme import THEME
-from dai_vera.gui.components.navigation import TopNav, PAGES
+from dai_vera.gui.components.navigation import SidebarNav, PAGES
 from dai_vera.gui.state import AppState
 
 from dai_vera.gui.pages.import_ct import ImportCTPage
@@ -23,11 +23,12 @@ class DAIVeraApp(ctk.CTk):
         super().__init__()
 
         self.title("DAI Vera")
-        self.geometry("1200x700")
-        self.minsize(1100, 650)
+        self.geometry("1600x900")
+        self.minsize(1200, 675)
 
         ctk.set_appearance_mode("dark")
         self.configure(fg_color=THEME["bg"])
+        self.wm_aspect(16, 9, 24, 13)
 
         # shared state across pages
         self.app_state = AppState()
@@ -35,20 +36,21 @@ class DAIVeraApp(ctk.CTk):
         self.current_key = "import_ct"
         self.page_instance = None
 
-        # responsive root grid
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        # responsive workstation shell
+        self.grid_columnconfigure(0, weight=0, minsize=280)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-        self.nav = TopNav(
+        self.nav = SidebarNav(
             self,
             on_navigate=self.navigate,
             on_next=self.go_next,
             get_current_key=lambda: self.current_key,
         )
-        self.nav.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
+        self.nav.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=0)
 
         self.content = ctk.CTkFrame(self, fg_color=THEME["bg"])
-        self.content.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
+        self.content.grid(row=0, column=1, sticky="nsew", padx=(0, 12), pady=10)
 
         # fullscreen toggles
         self._is_fullscreen = False
@@ -72,7 +74,6 @@ class DAIVeraApp(ctk.CTk):
 
         self.current_key = key
         page_cls = PAGE_CLASSES[key]
-        # ✅ pass shared state to every page
         self.page_instance = page_cls(self.content, app_state=self.app_state)
         self.page_instance.pack(fill="both", expand=True)
 

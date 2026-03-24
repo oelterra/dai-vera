@@ -1,4 +1,5 @@
 import customtkinter as ctk
+
 from dai_vera.gui.theme import THEME, FONTS
 
 PAGES = [
@@ -9,94 +10,114 @@ PAGES = [
 ]
 
 
-class TopNav(ctk.CTkFrame):
+class SidebarNav(ctk.CTkFrame):
     def __init__(self, master, on_navigate, on_next, get_current_key):
         super().__init__(
             master,
             fg_color=THEME["panel"],
-            corner_radius=18,
+            corner_radius=0,
             border_width=0,
+            width=280,
         )
 
         self.on_navigate = on_navigate
         self.on_next = on_next
         self.get_current_key = get_current_key
 
-        # Layout: [title] [steps (expands)] [next]
-        self.grid_columnconfigure(0, weight=0)
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_columnconfigure(2, weight=0)
+        self.grid_rowconfigure(0, weight=0)
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(2, weight=0)
+        self.grid_columnconfigure(0, weight=1)
 
-        # ---------------- LEFT: TITLE ONLY ----------------
-        left = ctk.CTkFrame(self, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="w", padx=14, pady=12)
+        brand = ctk.CTkFrame(self, fg_color="transparent")
+        brand.grid(row=0, column=0, sticky="ew", padx=22, pady=(22, 14))
+        brand.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(left, text="DAI", text_color=THEME["accent"], font=FONTS["h2"]).pack(side="left")
-        ctk.CTkLabel(left, text="Vera", text_color=THEME["text"], font=FONTS["h2"]).pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(
+            brand,
+            text="DAI Vera",
+            font=("Helvetica", 28, "bold"),
+            text_color=THEME["text"],
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            brand,
+            text="CT workstation workflow",
+            font=FONTS["body"],
+            text_color=THEME["muted"],
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
-        # ---------------- CENTER: STEP BUTTONS (RESIZABLE) ----------------
-        center = ctk.CTkFrame(self, fg_color="transparent")
-        center.grid(row=0, column=1, sticky="ew", padx=10, pady=10)
-        center.grid_columnconfigure(0, weight=1)
-
-        # darker + thinner border, and it stretches with the window
-        self.steps_wrap = ctk.CTkFrame(
-            center,
-            fg_color=THEME["panel_2"],
-            corner_radius=12,
-            border_width=1,                 # thinner
-            border_color=THEME["black"],   # darker outline
-        )
-        self.steps_wrap.grid(row=0, column=0, sticky="ew")
-        self.steps_wrap.grid_columnconfigure(0, weight=1)
-
-        # inner frame stretches too
-        self.steps_inner = ctk.CTkFrame(self.steps_wrap, fg_color="transparent")
-        self.steps_inner.grid(row=0, column=0, sticky="ew", padx=14, pady=10)
-
-        for i in range(len(PAGES)):
-            self.steps_inner.grid_columnconfigure(i, weight=1)
+        nav_body = ctk.CTkFrame(self, fg_color="transparent")
+        nav_body.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
+        nav_body.grid_columnconfigure(0, weight=1)
 
         self.step_buttons = {}
-        for i, (label, key) in enumerate(PAGES):
-            b = ctk.CTkButton(
-                self.steps_inner,
+        for idx, (label, key) in enumerate(PAGES, start=1):
+            btn = ctk.CTkButton(
+                nav_body,
                 text=label,
-                height=32,  # slightly thinner
-                corner_radius=12,
-                fg_color=THEME["panel_3"],
-                hover_color=THEME["border"],
+                anchor="w",
+                height=60,
+                corner_radius=14,
+                fg_color=THEME["panel_2"],
+                hover_color=THEME["panel_3"],
+                border_width=1,
+                border_color=THEME["border"],
                 text_color=THEME["text"],
-                font=FONTS["body"],
-                command=lambda k=key: self.on_navigate(k),
+                font=FONTS["h2"],
+                command=lambda page_key=key: self.on_navigate(page_key),
             )
-            # more spacing between tabs + expands evenly
-            b.grid(row=0, column=i, padx=10, sticky="ew")
-            self.step_buttons[key] = b
+            btn.grid(row=idx - 1, column=0, sticky="ew", pady=(0, 10))
+            self.step_buttons[key] = btn
 
-        # ---------------- RIGHT: NEXT ----------------
-        right = ctk.CTkFrame(self, fg_color="transparent")
-        right.grid(row=0, column=2, sticky="e", padx=14, pady=12)
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.grid(row=2, column=0, sticky="ew", padx=16, pady=(12, 18))
+        footer.grid_columnconfigure(0, weight=1)
+
+        self.current_label = ctk.CTkLabel(
+            footer,
+            text="Current Step",
+            font=FONTS["small"],
+            text_color=THEME["muted"],
+            anchor="w",
+        )
+        self.current_label.grid(row=0, column=0, sticky="ew", padx=8, pady=(0, 10))
 
         self.next_btn = ctk.CTkButton(
-            right,
-            text="Next",
-            height=36,
-            width=140,
+            footer,
+            text="Next Step",
+            height=44,
+            corner_radius=12,
             fg_color=THEME["accent"],
             hover_color=THEME["accent_2"],
             text_color="black",
-            corner_radius=12,
+            font=FONTS["h2"],
             command=self.on_next,
         )
-        self.next_btn.pack()
+        self.next_btn.grid(row=1, column=0, sticky="ew")
 
         self.refresh()
 
     def refresh(self):
         current = self.get_current_key()
+        current_label = next((label for label, key in PAGES if key == current), "Current Step")
+        self.current_label.configure(text=current_label)
+
+        keys = [key for _, key in PAGES]
+        is_last = current == keys[-1]
+        self.next_btn.configure(state="disabled" if is_last else "normal")
+
         for key, btn in self.step_buttons.items():
             if key == current:
-                btn.configure(fg_color=THEME["accent"], text_color="black")
+                btn.configure(
+                    fg_color=THEME["accent"],
+                    hover_color=THEME["accent_2"],
+                    border_color=THEME["accent"],
+                    text_color="black",
+                )
             else:
-                btn.configure(fg_color=THEME["panel_3"], text_color=THEME["text"])
+                btn.configure(
+                    fg_color=THEME["panel_2"],
+                    hover_color=THEME["panel_3"],
+                    border_color=THEME["border"],
+                    text_color=THEME["text"],
+                )
