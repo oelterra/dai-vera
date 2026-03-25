@@ -342,34 +342,15 @@ class CurvesROIPage(ctk.CTkFrame):
             height=32,
         ).grid(row=0, column=3, sticky="ew")
 
-        # row 1 — Interpolate
-        row2 = ctk.CTkFrame(self.controls, fg_color="transparent")
-        row2.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
-        row2.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(row2, text="Interpolate Current Slice", font=FONTS["body"]).grid(row=0, column=0, sticky="w")
-        self.var_interpolate = ctk.StringVar(value="With Next Slice")
-        ctk.CTkOptionMenu(
-            row2,
-            values=["With Next Slice", "With Previous Slice", "Off"],
-            variable=self.var_interpolate,
-            fg_color=THEME["input_bg"],
-            button_color=THEME["border"],
-            button_hover_color=THEME["border_2"],
-            dropdown_fg_color=THEME["panel_2"],
-            dropdown_hover_color=THEME["border"],
-            height=32,
-        ).grid(row=0, column=1, sticky="ew", padx=(12, 0))
-
-        # rows 2-3 — L / W
+        # rows 1-2 — L / W
         self.var_len = ctk.DoubleVar(value=float(self.state.ctp_length))
         self.var_wid = ctk.DoubleVar(value=float(self.state.ctp_width))
-        self._build_slider_line(self.controls, "L", self.var_len, row=2)
-        self._build_slider_line(self.controls, "W", self.var_wid, row=3)
+        self._build_slider_line(self.controls, "L", self.var_len, row=1)
+        self._build_slider_line(self.controls, "W", self.var_wid, row=2)
 
-        # row 4 — Set pre/post lesion
+        # row 3 — Set pre/post lesion
         row3 = ctk.CTkFrame(self.controls, fg_color="transparent")
-        row3.grid(row=4, column=0, sticky="ew", padx=12, pady=(8, 6))
+        row3.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 6))
         row3.grid_columnconfigure(0, weight=1)
         row3.grid_columnconfigure(1, weight=1)
 
@@ -387,9 +368,9 @@ class CurvesROIPage(ctk.CTkFrame):
             command=lambda: self._on_set_lesion("post"),
         ).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
-        # row 5 — Play / speed / height-positive
+        # row 4 — Play / speed / height-positive
         row4 = ctk.CTkFrame(self.controls, fg_color="transparent")
-        row4.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 10))
+        row4.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
         row4.grid_columnconfigure(1, weight=1)
 
         self.btn_play = ctk.CTkButton(
