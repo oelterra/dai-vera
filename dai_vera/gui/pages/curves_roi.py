@@ -1,7 +1,4 @@
-"""
-curves_roi_page.py  —  FIXED VERSION
--------------------------------------
-Fixes applied:
+""" curves_roi_page.py  —  FIXED VERSION ------------------------------------- Fixes applied:
   1. Search ROI rectangle drawn with correct canvas-scaled coordinates
   2. Search ROI size respects the dropdown (1x1→20px, 2x2→40px, etc.)
   3. Undo re-uses tight axis limits from data — never resets to -50..500
@@ -9,10 +6,13 @@ Fixes applied:
   5. Baseline/Washout slider sync works bidirectionally
   6. baseline_hu_offset NameError fixed in get_fitted_curve (patch applied here)
   7. _redraw_curve keeps tight y-limits and does NOT call _configure_axes
+  8. [NEW] Undo is snapshot-based — restores previous visual state, never removes raw points
+  9. [NEW] _on_fit_curve uncommented all axis/plot calls so fitted curve renders correctly
 """
 
 from __future__ import annotations
 
+import copy
 import tkinter as tk
 from typing import Optional, Literal
 
@@ -31,7 +31,7 @@ from dai_vera.roi_sampling import get_best_sample
 from dai_vera.drawlesioncurves import (
     plot_sampled_curve,
     plot_fitted_overlay,
-    get_fitted_curve_safe,
+    get_fitted_curve,
     _COLOUR,
 )
 from dai_vera.roi_json import save_roi_as_json
@@ -132,28 +132,32 @@ class CurvesROIPage(ctk.CTkFrame):
         super().__init__(master, fg_color=THEME["bg"])
         self.state = app_state
 
-        self.grid_columnconfigure(0, weight=1, uniform="half")
-        self.grid_columnconfigure(1, weight=1, uniform="half")
+        self.grid_columnconfigure(0, weight=7)
+        self.grid_columnconfigure(1, weight=4)
         self.grid_rowconfigure(0, weight=1)
 
         # ── layout panels ─────────────────────────────────────────────────────
         self.left_outer = ctk.CTkFrame(self, fg_color=THEME["panel"], corner_radius=18)
-        self.left_outer.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=12)
+        self.left_outer.grid(row=0, column=0, sticky="nsew", padx=(8, 5), pady=8)
         self.left_outer.grid_rowconfigure(0, weight=1)
         self.left_outer.grid_columnconfigure(0, weight=1)
 
-        self.left = ctk.CTkScrollableFrame(self.left_outer, fg_color="transparent")
+        self.left = ctk.CTkFrame(self.left_outer, fg_color="transparent")
         self.left.grid(row=0, column=0, sticky="nsew")
         self.left.grid_columnconfigure(0, weight=1)
+        self.left.grid_rowconfigure(0, weight=5)
+        self.left.grid_rowconfigure(1, weight=2)
 
         self.right_outer = ctk.CTkFrame(self, fg_color=THEME["panel"], corner_radius=18)
-        self.right_outer.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=12)
+        self.right_outer.grid(row=0, column=1, sticky="nsew", padx=(5, 8), pady=8)
         self.right_outer.grid_rowconfigure(0, weight=1)
         self.right_outer.grid_columnconfigure(0, weight=1)
 
-        self.right = ctk.CTkScrollableFrame(self.right_outer, fg_color="transparent")
+        self.right = ctk.CTkFrame(self.right_outer, fg_color="transparent")
         self.right.grid(row=0, column=0, sticky="nsew")
         self.right.grid_columnconfigure(0, weight=1)
+        self.right.grid_rowconfigure(0, weight=1)
+        self.right.grid_rowconfigure(1, weight=1)
 
         # ── internal state ────────────────────────────────────────────────────
         self.current_x: Optional[int] = None
@@ -162,9 +166,17 @@ class CurvesROIPage(ctk.CTkFrame):
         self._movie_after_id: Optional[str] = None
         self._ctp_photo = None
         self._current_drag_lesion: Optional[LesionType] = None
+        self._ctp_zoom = 1.0
+        self._ctp_display_rect: Optional[tuple[float, float, float, float, int, int]] = None
+        self._overlay_image: Optional[np.ndarray] = None
+        self._ctp_pan_x = 0.0
+        self._ctp_pan_y = 0.0
+        self._ctp_drag_origin: Optional[tuple[int, int]] = None
+        self._ctp_drag_pan_start: Optional[tuple[float, float]] = None
+        self._ctp_was_dragged = False
 
         # last search-ROI rectangle in IMAGE pixel space (for redraw on slice change)
-        self._last_search_roi_img: Optional[tuple] = None   # (r0,c0,r1,c1)
+        self._last_search_roi_img: Optional[tuple] = None  # (r0,c0,r1,c1)
 
         self.pre_lesion_block  = None
         self.post_lesion_block = None
@@ -187,37 +199,58 @@ class CurvesROIPage(ctk.CTkFrame):
 
     def _build_ctp_panel(self) -> None:
         self.ctp_panel = ctk.CTkFrame(self.left, fg_color=THEME["panel_2"], corner_radius=16)
-        self.ctp_panel.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 10))
+        self.ctp_panel.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 6))
         self.ctp_panel.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(self.ctp_panel, text="CTP Images", font=FONTS["h1"]).grid(
-            row=0, column=0, sticky="w", padx=14, pady=(12, 8)
-        )
+        self.ctp_panel.grid_rowconfigure(1, weight=1)
 
         content = ctk.CTkFrame(self.ctp_panel, fg_color="transparent")
-        content.grid(row=1, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 10))
-        content.grid_columnconfigure(0, weight=1)
-        content.grid_columnconfigure(1, weight=0)
+        content.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 2))
+        content.grid_columnconfigure(0, weight=0)
+        content.grid_columnconfigure(1, weight=1)
+        content.grid_columnconfigure(2, weight=0)
+        content.grid_rowconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            content,
+            text="CTP\nImages",
+            font=FONTS["h2"],
+            text_color=THEME["text"],
+            justify="left",
+            anchor="nw",
+        ).grid(row=0, column=0, sticky="nw", padx=(0, 10), pady=(2, 0))
 
         # image canvas
-        img_box = ctk.CTkFrame(content, fg_color=THEME["panel_3"], corner_radius=14, height=280)
-        img_box.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        img_box.grid_propagate(False)
-
-        self.img_canvas = tk.Canvas(img_box, bg="black", highlightthickness=0)
-        self.img_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self.img_canvas.bind("<Button-1>", self._on_image_click)
+        self.img_canvas = tk.Canvas(content, bg=THEME["panel_3"], highlightthickness=0)
+        self.img_canvas.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
+        self.img_canvas.bind("<ButtonPress-1>", self._on_ctp_canvas_press)
+        self.img_canvas.bind("<B1-Motion>", self._on_ctp_canvas_drag)
+        self.img_canvas.bind("<ButtonRelease-1>", self._on_ctp_canvas_release)
+        self.img_canvas.bind("<Configure>", lambda _e: self._render_ctp_image())
+        self.img_canvas.bind("<MouseWheel>", self._on_ctp_zoom_event)
+        self.img_canvas.bind("<Button-4>", self._on_ctp_zoom_event)
+        self.img_canvas.bind("<Button-5>", self._on_ctp_zoom_event)
+        self.img_canvas.bind("<Double-Button-1>", self._reset_ctp_zoom)
 
         self.lbl_ctp_source = ctk.CTkLabel(
-            img_box, text="", font=FONTS["body"], text_color=THEME["muted"]
+            content, text="", font=FONTS["body"], text_color=THEME["muted"]
         )
-        self.lbl_ctp_source.place(relx=0.5, rely=0.5, anchor="center")
+        self.lbl_ctp_source.place(in_=self.img_canvas, relx=0.5, rely=0.5, anchor="center")
 
         # slice (vertical) slider
         slice_col = ctk.CTkFrame(content, fg_color="transparent")
-        slice_col.grid(row=0, column=1, sticky="ns")
+        slice_col.grid(row=0, column=2, sticky="ns")
 
         ctk.CTkLabel(slice_col, text="Slice", text_color=THEME["muted"], font=FONTS["small"]).pack(pady=(6, 6))
+
+        self.lbl_ctp_slice_val = ctk.CTkLabel(
+            slice_col,
+            text=str(int(self.state.ctp_slice)),
+            font=FONTS["small"],
+            width=56,
+            fg_color=THEME["panel_3"],
+            corner_radius=10,
+        )
+        self.lbl_ctp_slice_val.pack(pady=(0, 8))
 
         self.var_ctp_slice = ctk.IntVar(value=int(self.state.ctp_slice))
         self.slider_ctp_slice = ctk.CTkSlider(
@@ -229,18 +262,16 @@ class CurvesROIPage(ctk.CTkFrame):
             progress_color=THEME["accent"],
             button_color=THEME["accent"],
             button_hover_color=THEME["accent_2"],
-            height=220,
+            height=300,
             command=self._on_ctp_slice_change,
         )
-        self.slider_ctp_slice.pack(padx=6, pady=(0, 6))
-
-        self.lbl_ctp_slice_val = ctk.CTkLabel(slice_col, text=str(self.var_ctp_slice.get()), font=FONTS["small"])
-        self.lbl_ctp_slice_val.pack(pady=(0, 8))
+        self.slider_ctp_slice.pack(padx=6, pady=(0, 6), fill="y", expand=True)
 
         # time (horizontal) slider
         time_row = ctk.CTkFrame(self.ctp_panel, fg_color="transparent")
-        time_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 14))
+        time_row.grid(row=1, column=0, sticky="ew", padx=12, pady=(14, 8))
         time_row.grid_columnconfigure(1, weight=1)
+        time_row.grid_columnconfigure(2, minsize=72)
 
         ctk.CTkLabel(time_row, text="Time Points", text_color=THEME["muted"], font=FONTS["small"]).grid(
             row=0, column=0, sticky="w", padx=(0, 10)
@@ -259,17 +290,27 @@ class CurvesROIPage(ctk.CTkFrame):
         )
         self.slider_ctp_time.grid(row=0, column=1, sticky="ew")
 
-        self.lbl_ctp_time_val = ctk.CTkLabel(time_row, text=str(self.var_ctp_time.get()), font=FONTS["small"])
+        self.lbl_ctp_time_val = ctk.CTkLabel(
+            time_row,
+            text=str(self.var_ctp_time.get()),
+            font=FONTS["small"],
+            width=60,
+            fg_color=THEME["panel_3"],
+            corner_radius=10,
+        )
         self.lbl_ctp_time_val.grid(row=0, column=2, sticky="e", padx=(10, 0))
+
+        content.bind("<Configure>", lambda _event: self._update_ctp_image_size())
+        self.after(40, self._update_ctp_image_size)
 
     def _build_controls_panel(self) -> None:
         self.controls = ctk.CTkFrame(self.left, fg_color=THEME["panel_2"], corner_radius=16)
-        self.controls.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
+        self.controls.grid(row=1, column=0, sticky="nsew", padx=10, pady=(2, 10))
         self.controls.grid_columnconfigure(0, weight=1)
 
         # row 0 — Sample ROI / Search ROI
         row1 = ctk.CTkFrame(self.controls, fg_color="transparent")
-        row1.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 8))
+        row1.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
         row1.grid_columnconfigure(1, weight=1)
         row1.grid_columnconfigure(3, weight=1)
 
@@ -284,7 +325,7 @@ class CurvesROIPage(ctk.CTkFrame):
             button_hover_color=THEME["border_2"],
             dropdown_fg_color=THEME["panel_2"],
             dropdown_hover_color=THEME["border"],
-            height=34,
+            height=32,
         ).grid(row=0, column=1, sticky="ew")
 
         ctk.CTkLabel(row1, text="Search ROI", font=FONTS["body"]).grid(row=0, column=2, sticky="w", padx=(18, 10))
@@ -298,64 +339,45 @@ class CurvesROIPage(ctk.CTkFrame):
             button_hover_color=THEME["border_2"],
             dropdown_fg_color=THEME["panel_2"],
             dropdown_hover_color=THEME["border"],
-            height=34,
+            height=32,
         ).grid(row=0, column=3, sticky="ew")
 
-        # row 1 — Interpolate
-        row2 = ctk.CTkFrame(self.controls, fg_color="transparent")
-        row2.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 8))
-        row2.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(row2, text="Interpolate Current Slice", font=FONTS["body"]).grid(row=0, column=0, sticky="w")
-        self.var_interpolate = ctk.StringVar(value="With Next Slice")
-        ctk.CTkOptionMenu(
-            row2,
-            values=["With Next Slice", "With Previous Slice", "Off"],
-            variable=self.var_interpolate,
-            fg_color=THEME["input_bg"],
-            button_color=THEME["border"],
-            button_hover_color=THEME["border_2"],
-            dropdown_fg_color=THEME["panel_2"],
-            dropdown_hover_color=THEME["border"],
-            height=34,
-        ).grid(row=0, column=1, sticky="ew", padx=(12, 0))
-
-        # rows 2-3 — L / W
+        # rows 1-2 — L / W
         self.var_len = ctk.DoubleVar(value=float(self.state.ctp_length))
         self.var_wid = ctk.DoubleVar(value=float(self.state.ctp_width))
-        self._build_slider_line(self.controls, "L", self.var_len, row=2)
-        self._build_slider_line(self.controls, "W", self.var_wid, row=3)
+        self._build_slider_line(self.controls, "L", self.var_len, row=1)
+        self._build_slider_line(self.controls, "W", self.var_wid, row=2)
 
-        # row 4 — Set pre/post lesion
+        # row 3 — Set pre/post lesion
         row3 = ctk.CTkFrame(self.controls, fg_color="transparent")
-        row3.grid(row=4, column=0, sticky="ew", padx=14, pady=(10, 8))
+        row3.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 6))
         row3.grid_columnconfigure(0, weight=1)
         row3.grid_columnconfigure(1, weight=1)
 
         ctk.CTkButton(
             row3, text="Set Pre Lesion",
             fg_color=THEME["panel_3"], hover_color=THEME["border_2"],
-            height=36, corner_radius=12,
+            height=34, corner_radius=12,
             command=lambda: self._on_set_lesion("pre"),
         ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
         ctk.CTkButton(
             row3, text="Set Post Lesion",
             fg_color=THEME["panel_3"], hover_color=THEME["border_2"],
-            height=36, corner_radius=12,
+            height=34, corner_radius=12,
             command=lambda: self._on_set_lesion("post"),
         ).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
-        # row 5 — Play / speed / height-positive
+        # row 4 — Play / speed / height-positive
         row4 = ctk.CTkFrame(self.controls, fg_color="transparent")
-        row4.grid(row=5, column=0, sticky="ew", padx=14, pady=(0, 14))
+        row4.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
         row4.grid_columnconfigure(1, weight=1)
 
         self.btn_play = ctk.CTkButton(
             row4, text="Play Movie",
             fg_color=THEME["accent"], hover_color=THEME["accent_2"],
             text_color="black",
-            height=36, corner_radius=12,
+            height=34, corner_radius=12,
             command=self._toggle_movie,
         )
         self.btn_play.grid(row=0, column=0, sticky="w")
@@ -370,7 +392,7 @@ class CurvesROIPage(ctk.CTkFrame):
             button_hover_color=THEME["border_2"],
             dropdown_fg_color=THEME["panel_2"],
             dropdown_hover_color=THEME["border"],
-            height=34, width=120,
+            height=32, width=108,
         ).grid(row=0, column=1, sticky="w", padx=(12, 0))
 
         self.var_height_positive = ctk.BooleanVar(value=False)
@@ -385,7 +407,7 @@ class CurvesROIPage(ctk.CTkFrame):
 
     def _build_slider_line(self, parent, label: str, var: ctk.DoubleVar, row: int) -> None:
         line = ctk.CTkFrame(parent, fg_color="transparent")
-        line.grid(row=row, column=0, sticky="ew", padx=14, pady=6)
+        line.grid(row=row, column=0, sticky="ew", padx=12, pady=4)
         line.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(line, text=label, font=FONTS["body"]).grid(row=0, column=0, sticky="w", padx=(0, 10))
@@ -397,6 +419,19 @@ class CurvesROIPage(ctk.CTkFrame):
             button_hover_color=THEME["accent_2"],
             command=lambda _=None: self._sync_window_to_state(),
         ).grid(row=0, column=1, sticky="ew")
+
+    def _update_ctp_image_size(self) -> None:
+        parent = self.img_canvas.master
+        if parent is None:
+            return
+
+        parent.update_idletasks()
+        total_w = max(1, parent.winfo_width())
+        total_h = max(1, parent.winfo_height())
+        title_w = 58
+        slider_w = 78
+        target = min(max(260, total_w - title_w - slider_w - 18), max(260, total_h + 16))
+        self.img_canvas.configure(width=target, height=target)
 
     # =========================================================================
     # RIGHT PANEL — curve blocks
@@ -411,15 +446,15 @@ class CurvesROIPage(ctk.CTkFrame):
 
         block = ctk.CTkFrame(parent, fg_color=THEME["panel_2"], corner_radius=16)
         block.grid(
-            row=row, column=0, sticky="ew", padx=14,
-            pady=(14, 10) if row == 0 else (0, 14),
+            row=row, column=0, sticky="nsew", padx=12,
+            pady=(12, 6) if row == 0 else (6, 12),
         )
         block.grid_columnconfigure(0, weight=1)
         block.grid_rowconfigure(1, weight=1)
 
         # header
         header = ctk.CTkFrame(block, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 8))
+        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
         header.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(header, text=title, font=FONTS["h1"]).grid(row=0, column=0, sticky="w")
@@ -440,7 +475,7 @@ class CurvesROIPage(ctk.CTkFrame):
         ).pack(side="left")
 
         # matplotlib figure
-        fig = Figure(figsize=(6, 4), dpi=100)
+        fig = Figure(figsize=(6, 3.2), dpi=100)
         ax  = fig.add_subplot(111)
         ax.set_facecolor("black")
         fig.patch.set_facecolor("black")
@@ -465,10 +500,13 @@ class CurvesROIPage(ctk.CTkFrame):
         block.start_line   = ax.axvline(0,  color=THEME["accent"], linewidth=2, visible=False)
         block.end_line     = ax.axvline(10, color=THEME["accent"], linewidth=2, visible=False)
 
+        # ── Snapshot stack for undo (stores visual state, NOT raw point removal) ──
+        block._undo_stack: list[dict] = []
+
         canvas = FigureCanvasTkAgg(fig, master=block)
         w = canvas.get_tk_widget()
         w.configure(bg="black", highlightthickness=0)
-        w.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 10))
+        w.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
         block.canvas = canvas
 
         canvas.mpl_connect("button_press_event",
@@ -476,7 +514,7 @@ class CurvesROIPage(ctk.CTkFrame):
 
         # ── Start / End range sliders ──────────────────────────────────────
         controls = ctk.CTkFrame(block, fg_color="transparent")
-        controls.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 6))
+        controls.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 4))
         controls.grid_columnconfigure(1, weight=1)
         controls.grid_columnconfigure(3, weight=1)
 
@@ -504,7 +542,7 @@ class CurvesROIPage(ctk.CTkFrame):
 
         # ── Baseline / Washout entries + Fit Curve ────────────────────────
         fit_row = ctk.CTkFrame(block, fg_color="transparent")
-        fit_row.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 6))
+        fit_row.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 4))
 
         ctk.CTkLabel(fit_row, text="Baseline", text_color=THEME["muted"],
                      font=FONTS["small"]).pack(side="left")
@@ -535,7 +573,7 @@ class CurvesROIPage(ctk.CTkFrame):
 
         # ── Edit Point / Remove Point ──────────────────────────────────────
         point_row = ctk.CTkFrame(block, fg_color="transparent")
-        point_row.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 14))
+        point_row.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 10))
 
         ctk.CTkButton(
             point_row, text="Edit Point",
@@ -567,12 +605,6 @@ class CurvesROIPage(ctk.CTkFrame):
 
     # -------------------------------------------------------------------------
     def _wire_range_controls(self, block, baseline_entry, washout_entry) -> None:
-        """
-        Bidirectional sync between Start/End sliders and Baseline/Washout entries.
-        Changing either one updates the other AND re-runs the fit automatically.
-        """
-
-        # ── Slider → Entry ────────────────────────────────────────────────
         def on_start_slider(val, b=block):
             t = float(val)
             try:
@@ -606,7 +638,6 @@ class CurvesROIPage(ctk.CTkFrame):
         block.s_start.configure(command=on_start_slider)
         block.s_end.configure(command=on_end_slider)
 
-        # ── Entry → Slider → fit (on Enter or FocusOut) ───────────────────
         def apply_baseline(event=None, b=block):
             if not b.times:
                 return
@@ -654,9 +685,100 @@ class CurvesROIPage(ctk.CTkFrame):
     # Rendering helpers
     # =========================================================================
 
+    def _on_ctp_zoom_event(self, event):
+        vol = getattr(self.state, "ctp_volume", None)
+        if not vol:
+            return
+
+        delta = getattr(event, "delta", 0)
+        num = getattr(event, "num", None)
+        if delta > 0 or num == 4:
+            factor = 1.1
+        elif delta < 0 or num == 5:
+            factor = 1 / 1.1
+        else:
+            return
+
+        self._ctp_zoom = min(6.0, max(1.0, self._ctp_zoom * factor))
+        if self._overlay_image is not None:
+            self._render_ctp_image_with(self._overlay_image)
+        else:
+            self._render_ctp_image()
+        return "break"
+
+    def _reset_ctp_zoom(self, _event=None):
+        self._ctp_zoom = 1.0
+        self._ctp_pan_x = 0.0
+        self._ctp_pan_y = 0.0
+        if self._overlay_image is not None:
+            self._render_ctp_image_with(self._overlay_image)
+        else:
+            self._render_ctp_image()
+        return "break"
+
+    def _on_ctp_canvas_press(self, event) -> None:
+        self._ctp_drag_origin = (event.x, event.y)
+        self._ctp_drag_pan_start = (self._ctp_pan_x, self._ctp_pan_y)
+        self._ctp_was_dragged = False
+
+    def _on_ctp_canvas_drag(self, event) -> None:
+        vol = getattr(self.state, "ctp_volume", None)
+        if not vol or self._ctp_zoom <= 1.0 or self._ctp_drag_origin is None or self._ctp_drag_pan_start is None:
+            return
+
+        start_x, start_y = self._ctp_drag_origin
+        pan_start_x, pan_start_y = self._ctp_drag_pan_start
+        dx = event.x - start_x
+        dy = event.y - start_y
+        if abs(dx) > 2 or abs(dy) > 2:
+            self._ctp_was_dragged = True
+        self._ctp_pan_x = pan_start_x + dx
+        self._ctp_pan_y = pan_start_y + dy
+        if self._overlay_image is not None:
+            self._render_ctp_image_with(self._overlay_image)
+        else:
+            self._render_ctp_image()
+
+    def _on_ctp_canvas_release(self, event) -> None:
+        dragged = self._ctp_was_dragged
+        self._ctp_drag_origin = None
+        self._ctp_drag_pan_start = None
+        self._ctp_was_dragged = False
+        if not dragged:
+            self._on_image_click(event)
+
+    def _draw_ctp_canvas_image(self, img8: np.ndarray) -> None:
+        cw = max(10, self.img_canvas.winfo_width())
+        ch = max(10, self.img_canvas.winfo_height())
+        pil = Image.fromarray(img8)
+        img_w, img_h = pil.size
+
+        scale = min(cw / max(1, img_w), ch / max(1, img_h))
+        scale *= self._ctp_zoom
+        disp_w = int(round(img_w * scale))
+        disp_h = int(round(img_h * scale))
+        max_pan_x = max(0.0, (disp_w - cw) / 2.0)
+        max_pan_y = max(0.0, (disp_h - ch) / 2.0)
+        self._ctp_pan_x = float(np.clip(self._ctp_pan_x, -max_pan_x, max_pan_x))
+        self._ctp_pan_y = float(np.clip(self._ctp_pan_y, -max_pan_y, max_pan_y))
+        center_x = (cw / 2.0) + self._ctp_pan_x
+        center_y = (ch / 2.0) + self._ctp_pan_y
+        x0 = center_x - (disp_w / 2.0)
+        y0 = center_y - (disp_h / 2.0)
+        self._ctp_display_rect = (x0, y0, disp_w, disp_h, img_h, img_w)
+
+        photo = ImageTk.PhotoImage(pil.resize((disp_w, disp_h), Image.Resampling.LANCZOS))
+        self._ctp_photo = photo
+
+        self.img_canvas.delete("all")
+        self.img_canvas.update_idletasks()
+        self.img_canvas.create_image(center_x, center_y, image=photo, anchor="center")
+        self.lbl_ctp_source.configure(text="")
+
     def _render_ctp_image(self) -> None:
         vol = getattr(self.state, "ctp_volume", None)
         if not vol:
+            self._ctp_display_rect = None
             self.lbl_ctp_source.configure(text="No CTP loaded")
             return
 
@@ -680,38 +802,29 @@ class CurvesROIPage(ctk.CTkFrame):
             length=float(getattr(self.state, "ctp_length", 0.5)),
             width =float(getattr(self.state, "ctp_width",  0.5)),
         )
+        self._overlay_image = None
+        self._draw_ctp_canvas_image(img8)
 
-        cw = max(10, self.img_canvas.winfo_width())
-        ch = max(10, self.img_canvas.winfo_height())
-
-        photo = ImageTk.PhotoImage(Image.fromarray(img8).resize((cw, ch)))
-        self._ctp_photo = photo
-
-        self.img_canvas.delete("all")
-        self.img_canvas.create_image(cw // 2, ch // 2, image=photo, anchor="center")
-        self.lbl_ctp_source.configure(text="")
-
-        # redraw the search-ROI rectangle if one exists
         if self._last_search_roi_img is not None:
             self._draw_search_roi_rect(*self._last_search_roi_img, img_h=H, img_w=W)
 
     def _image_to_canvas(self, r_img: int, c_img: int, img_h: int, img_w: int) -> tuple[float, float]:
-        """Convert image pixel (row, col) → canvas pixel (cx, cy)."""
-        cw = max(1, self.img_canvas.winfo_width())
-        ch = max(1, self.img_canvas.winfo_height())
-        cx = c_img * cw / img_w
-        cy = r_img * ch / img_h
+        rect = self._ctp_display_rect
+        if rect is None:
+            return 0.0, 0.0
+        x0, y0, disp_w, disp_h, _, _ = rect
+        cx = x0 + (c_img * disp_w / max(1, img_w))
+        cy = y0 + (r_img * disp_h / max(1, img_h))
         return cx, cy
 
     def _draw_search_roi_rect(self, r0: int, c0: int, r1: int, c1: int,
                                img_h: int, img_w: int) -> None:
-        """Draw the search-window rectangle on the canvas in scaled coordinates."""
         self.img_canvas.delete("search_roi")
         x0, y0 = self._image_to_canvas(r0, c0, img_h, img_w)
         x1, y1 = self._image_to_canvas(r1, c1, img_h, img_w)
         self.img_canvas.create_rectangle(
             x0, y0, x1, y1,
-            outline="white", width=1, tags="search_roi",
+            outline="#00FFFF", width=1, tags="search_roi",
         )
 
     def _render_ctp_image_with(self, image_override: np.ndarray) -> None:
@@ -720,71 +833,46 @@ class CurvesROIPage(ctk.CTkFrame):
             length=float(getattr(self.state, "ctp_length", 0.5)),
             width =float(getattr(self.state, "ctp_width",  0.5)),
         )
-        cw = max(10, self.img_canvas.winfo_width())
-        ch = max(10, self.img_canvas.winfo_height())
-        photo = ImageTk.PhotoImage(Image.fromarray(img8).resize((cw, ch)))
-        self._ctp_photo = photo
-        self.img_canvas.delete("all")
-        self.img_canvas.create_image(cw // 2, ch // 2, image=photo, anchor="center")
-
-    # ── curve redraw (FIXED — keeps tight limits, never resets to -50..500) ──
+        self._overlay_image = image_override
+        self._draw_ctp_canvas_image(img8)
 
     def _redraw_curve(self, block) -> None:
-        """
-        Redraw only the sampled dots, preserving tight axis limits.
-        Used by Undo and Clear — does NOT call plot_sampled_curve (which would
-        reset axes to the MATLAB -50…500 formula).
-        """
         ax = block.ax
-        ax.cla()
 
-        ax.set_facecolor("black")
-        ax.set_xlabel("Time (s)", color="white")
-        ax.set_ylabel("Enhancement (HU)", color="white")
-        for spine in ax.spines.values():
-            spine.set_color("white")
-        ax.tick_params(colors="white")
-
+        # Only redraw if there are points
         if block.times:
-            times_arr  = np.asarray(block.times, dtype=float)
+            times_arr = np.asarray(block.times, dtype=float)
             values_arr = np.asarray(block.values, dtype=float)
-            colour     = _COLOUR.get(block.lesion, "white")
 
-            ax.plot(times_arr, values_arr, "o",
-                    color=colour, markersize=5, alpha=0.85,
-                    label=f"{'Pre' if block.lesion == 'pre' else 'Post'}-Lesion Sampled")
+            if hasattr(block, 'points_line') and block.points_line is not None:
+                block.points_line.set_data(times_arr, values_arr)
+            else:
+                block.points_line, = ax.plot(times_arr, values_arr, "o",
+                                             color="mediumpurple", markersize=5, alpha=0.85,
+                                             label="Sampled Points")
 
-            # tight limits
             t_s, t_e = float(times_arr[0]), float(times_arr[-1])
-            v_lo, v_hi = float(np.min(values_arr)), float(np.max(values_arr))
-            pad = max(1.0, (v_hi - v_lo) * 0.10)
-            ax.set_xlim(t_s, t_e)
-            ax.set_ylim(v_lo - pad, v_hi + pad)
-
-            x_ticks = np.unique(np.linspace(t_s, t_e, 11).astype(int))
-            ax.set_xticks(x_ticks)
-            ax.set_xticklabels([str(int(t)) for t in x_ticks])
-
-            # update slider range
             n = max(1, len(times_arr) - 1)
             block.s_start.configure(from_=t_s, to=t_e, number_of_steps=n)
-            block.s_end.configure(from_=t_s,   to=t_e, number_of_steps=n)
-            block.var_start.set(t_s)
-            block.var_end.set(t_e)
+            block.s_end.configure(from_=t_s, to=t_e, number_of_steps=n)
+
+            ax.relim()
+            ax.autoscale_view()
+
+            if not hasattr(block, 'start_line') or block.start_line is None:
+                block.start_line = ax.axvline([block.var_start.get()], color=THEME["accent"], linewidth=2,
+                                              visible=False)
+            else:
+                block.start_line.set_xdata([block.var_start.get()])
+
+            if not hasattr(block, 'end_line') or block.end_line is None:
+                block.end_line = ax.axvline([block.var_end.get()], color=THEME["accent"], linewidth=2, visible=False)
+            else:
+                block.end_line.set_xdata([block.var_end.get()])
 
             ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
 
-        block.start_line = ax.axvline(
-            block.var_start.get() if block.times else 0,
-            color=THEME["accent"], linewidth=2, visible=False,
-        )
-        block.end_line = ax.axvline(
-            block.var_end.get() if block.times else 10,
-            color=THEME["accent"], linewidth=2, visible=False,
-        )
         block.canvas.draw_idle()
-
-    # ── canvas overlays ────────────────────────────────────────────────────────
 
     def _draw_crosshair(self, x: int, y: int) -> None:
         self.img_canvas.delete("crosshair")
@@ -818,8 +906,6 @@ class CurvesROIPage(ctk.CTkFrame):
         self.img_canvas.tag_bind("drag_point", "<B1-Motion>",       on_drag)
         self.img_canvas.tag_bind("drag_point", "<ButtonRelease-1>", on_release)
 
-    # ── curve range / axes sync ────────────────────────────────────────────────
-
     def _sync_curve_block_from_data(self, block, times: list, values: list) -> None:
         if not times:
             return
@@ -843,6 +929,89 @@ class CurvesROIPage(ctk.CTkFrame):
 
         block.start_line.set_xdata([t_start, t_start])
         block.end_line.set_xdata([t_end, t_end])
+
+    # =========================================================================
+    # Undo snapshot helpers
+    # =========================================================================
+
+    def _push_undo_snapshot(self, block) -> None:
+        """Save current visual state (axes contents + limits) onto the undo stack."""
+        snapshot = {
+            "xlim":     block.ax.get_xlim(),
+            "ylim":     block.ax.get_ylim(),
+            "var_start": block.var_start.get(),
+            "var_end":   block.var_end.get(),
+            # Serialise every artist on the axes so we can restore them
+            "lines": [
+                {
+                    "xdata":     list(line.get_xdata()),
+                    "ydata":     list(line.get_ydata()),
+                    "color":     line.get_color(),
+                    "linewidth": line.get_linewidth(),
+                    "linestyle": line.get_linestyle(),
+                    "marker":    line.get_marker(),
+                    "markersize":line.get_markersize(),
+                    "alpha":     line.get_alpha(),
+                    "label":     line.get_label(),
+                    "visible":   line.get_visible(),
+                    "zorder":    line.get_zorder(),
+                }
+                for line in block.ax.lines
+            ],
+        }
+        block._undo_stack.append(snapshot)
+
+    def _pop_undo_snapshot(self, block) -> bool:
+        """
+        Restore the most recent snapshot.  Returns True if something was restored.
+        Does NOT touch block.times / block.values — raw data is never removed by undo.
+        """
+        if not block._undo_stack:
+            return False
+
+        snapshot = block._undo_stack.pop()
+
+        # Clear current axes content, preserve styling
+        block.ax.cla()
+        block.ax.set_facecolor("black")
+        block.ax.set_xlabel("Time (s)", color="white")
+        block.ax.set_ylabel("Enhancement (HU)", color="white")
+        for spine in block.ax.spines.values():
+            spine.set_color("white")
+        block.ax.tick_params(colors="white")
+
+        # Re-draw every saved artist
+        for ld in snapshot["lines"]:
+            (line,) = block.ax.plot(
+                ld["xdata"], ld["ydata"],
+                color=ld["color"],
+                linewidth=ld["linewidth"],
+                linestyle=ld["linestyle"],
+                marker=ld["marker"],
+                markersize=ld["markersize"],
+                alpha=ld["alpha"] if ld["alpha"] is not None else 1.0,
+                label=ld["label"],
+                visible=ld["visible"],
+                zorder=ld["zorder"],
+            )
+
+        # Restore axis limits and slider positions
+        block.ax.set_xlim(snapshot["xlim"])
+        block.ax.set_ylim(snapshot["ylim"])
+        block.var_start.set(snapshot["var_start"])
+        block.var_end.set(snapshot["var_end"])
+
+        # Recreate the start/end marker lines so they stay referenced
+        block.start_line = block.ax.axvline(
+            snapshot["var_start"], color=THEME["accent"], linewidth=2, visible=False
+        )
+        block.end_line = block.ax.axvline(
+            snapshot["var_end"], color=THEME["accent"], linewidth=2, visible=False
+        )
+
+        block.ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
+        block.canvas.draw()
+        return True
 
     # =========================================================================
     # Event handlers
@@ -899,22 +1068,19 @@ class CurvesROIPage(ctk.CTkFrame):
         self._render_ctp_image()
         self._movie_after_id = self.after(delay, self._movie_loop)
 
-    # ── Undo / Clear ──────────────────────────────────────────────────────────
-
     def _curve_undo(self, block) -> None:
-        """Remove the last sampled point and redraw with tight limits."""
-        if not block.times:
-            return
-        block.times.pop()
-        block.values.pop()
-        block.selected_idx = None
-        self._redraw_curve(block)
+        """
+        Undo the last *visual* change (fit, overlay, etc.).
+        Raw data points (block.times / block.values) are NEVER removed here.
+        """
+        if not self._pop_undo_snapshot(block):
+            print(f"[{block.lesion}] Nothing to undo.")
 
     def _curve_clear(self, block) -> None:
-        """Clear all sampled points."""
         block.times        = []
         block.values       = []
         block.selected_idx = None
+        block._undo_stack.clear()
         self._redraw_curve(block)
 
     # =========================================================================
@@ -951,25 +1117,27 @@ class CurvesROIPage(ctk.CTkFrame):
         t_idx = min(max(0, int(self.var_ctp_time.get())  - 1), T - 1)
         z_idx = min(max(0, int(self.var_ctp_slice.get()) - 1), Z - 1)
 
-        # Canvas coords → image coords
-        cw = max(1, self.img_canvas.winfo_width())
-        ch = max(1, self.img_canvas.winfo_height())
-        click_row = int(self.current_y * H / ch)
-        click_col = int(self.current_x * W / cw)
+        rect = self._ctp_display_rect
+        if rect is None:
+            return
+        x0, y0, disp_w, disp_h, _, _ = rect
+        click_col = int(np.clip((self.current_x - x0) * W / max(1, disp_w), 0, W - 1))
+        click_row = int(np.clip((self.current_y - y0) * H / max(1, disp_h), 0, H - 1))
 
         sample_n  = int(self.var_sample_roi.get().split("x")[0].strip())
         search_n  = int(self.var_search_roi.get().split("x")[0].strip())
-        # search window size in pixels: 1x1→20, 2x2→40, 3x3→60, 4x4→80
-        search_px = search_n * 20
+        search_px = max(5, search_n)
 
-        # ── draw search-ROI rectangle on canvas ───────────────────────────
-        half = search_px // 2
-        r0 = max(0, click_row - half);  c0 = max(0, click_col - half)
-        r1 = min(H - 1, click_row + half); c1 = min(W - 1, click_col + half)
+        print("CLICK (row,col):", click_row, click_col)
+
+        half = search_px / 2.0
+        r0 = int(np.floor(click_row - half))
+        r1 = int(np.ceil(click_row + half))
+        c0 = int(np.floor(click_col - half))
+        c1 = int(np.ceil(click_col + half))
         self._last_search_roi_img = (r0, c0, r1, c1)
         self._draw_search_roi_rect(r0, c0, r1, c1, img_h=H, img_w=W)
 
-        # 1. get_best_sample
         sample = get_best_sample(
             x=click_row,
             y=click_col,
@@ -993,7 +1161,9 @@ class CurvesROIPage(ctk.CTkFrame):
               f"t=[{interp_times[0]:.1f}…{interp_times[-1]:.1f}]  "
               f"val=[{interp_vals[0]:.1f}…{interp_vals[-1]:.1f}]")
 
-        # 2. get_contour
+        print("RAW sampled values:", interp_vals[:10])
+        print("MIN/MAX:", np.min(interp_vals), np.max(interp_vals))
+
         contour = get_contour(
             x=click_row,
             y=click_col,
@@ -1005,7 +1175,6 @@ class CurvesROIPage(ctk.CTkFrame):
         )
         print(f"[{lesion}] radius={contour.radius_cm:.3f} cm  area={contour.area_cm2:.4f} cm²")
 
-        # 3. get_roi
         roi_obj = get_roi(
             study_name=getattr(self.state, "study_name", "Unknown"),
             num_time_points=T,
@@ -1023,7 +1192,6 @@ class CurvesROIPage(ctk.CTkFrame):
         else:
             self.post_roi = roi_obj
 
-        # 4. save JSON
         bundle = {
             "preRoiObject":  self._roi_to_dict(self.pre_roi),
             "postRoiObject": self._roi_to_dict(self.post_roi),
@@ -1031,20 +1199,18 @@ class CurvesROIPage(ctk.CTkFrame):
         path = save_roi_as_json(bundle)
         print(f"ROI saved → {path}")
 
-        # 5. overlay + redraw canvas
         image_2d = pixels[t_idx, z_idx].copy().astype(np.float32)
         overlaid = get_roi_overlayed(image_2d, sx_rows, sx_cols, overlay_value=1500.0)
         self._render_ctp_image_with(overlaid)
-        # redraw search rect on top of new image
         self._draw_search_roi_rect(r0, c0, r1, c1, img_h=H, img_w=W)
         self._draw_crosshair(self.current_x, self.current_y)
         self._add_draggable_point(self.current_x, self.current_y, lesion)
 
-        # 6. plot sampled curve (bypass _configure_axes by plotting manually)
         block = self.pre_lesion_block if lesion == "pre" else self.post_lesion_block
-        block.times        = interp_times.tolist()
-        block.values       = interp_vals.tolist()
+        block.times = interp_times.tolist()
+        block.values = interp_vals.tolist()
         block.selected_idx = None
+        block._undo_stack.clear()  # fresh data → clear old undo history
 
         block.ax.cla()
         block.ax.set_facecolor("black")
@@ -1054,24 +1220,39 @@ class CurvesROIPage(ctk.CTkFrame):
             spine.set_color("white")
         block.ax.tick_params(colors="white")
 
-        colour = _COLOUR.get(lesion, "white")
-        times_arr  = np.asarray(block.times, dtype=float)
+        times_arr  = np.asarray(block.times,  dtype=float)
         values_arr = np.asarray(block.values, dtype=float)
-        block.ax.plot(times_arr, values_arr, "o", color=colour,
-                      markersize=5, alpha=0.85,
-                      label=f"{'Pre' if lesion == 'pre' else 'Post'}-Lesion Sampled")
+
+        # ── Initial draw: sampled dots only (mirrors MATLAB behaviour) ───────────
+        # No connecting line or pre-fit — the curve only appears after
+        # the user clicks "Fit Curve" (gamma variate fit).
+        dot_color = "dodgerblue" if lesion == "pre" else "darkorange"
+        dot_label = "Pre-Lesion Sampled" if lesion == "pre" else "Post-Lesion Sampled"
+        block.ax.plot(times_arr, values_arr, "o",
+                      color=dot_color, markersize=5, alpha=0.95,
+                      label=dot_label)
+
+        # Lock axis limits so Undo never resets to defaults
+        block.initial_xlim = (float(times_arr.min()), float(times_arr.max()))
+        v_range = float(values_arr.max() - values_arr.min())
+        block.initial_ylim = (
+            float(values_arr.min()) - v_range * 0.1,
+            float(values_arr.max()) + v_range * 0.1,
+        )
+
+        block.ax.set_xlim(block.initial_xlim)
+        block.ax.set_ylim(block.initial_ylim)
+
+        block.ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
 
         self._sync_curve_block_from_data(block, block.times, block.values)
-        block.start_line = block.ax.axvline(
-            block.var_start.get(), color=THEME["accent"], linewidth=2, visible=False)
-        block.end_line = block.ax.axvline(
-            block.var_end.get(), color=THEME["accent"], linewidth=2, visible=False)
+
+        # Redraw markers (Start/End lines)
+        block.start_line = block.ax.axvline(block.var_start.get(), color=THEME["accent"], linewidth=2)
+        block.end_line   = block.ax.axvline(block.var_end.get(),   color=THEME["accent"], linewidth=2)
+
         block.canvas.draw()
 
-        # 7. auto-fit
-        self._on_fit_curve(block)
-
-    # =========================================================================
     # Fitting handler
     # =========================================================================
 
@@ -1084,7 +1265,6 @@ class CurvesROIPage(ctk.CTkFrame):
             times  = np.asarray(block.times,  dtype=float)
             values = np.asarray(block.values, dtype=float)
 
-            # 1. read start / end from sliders (these are always in sync with entries)
             t_start = float(block.var_start.get())
             t_end   = float(block.var_end.get())
 
@@ -1094,7 +1274,6 @@ class CurvesROIPage(ctk.CTkFrame):
                 block.var_start.set(t_start)
                 block.var_end.set(t_end)
 
-            # 2. trim to [start, end]
             mask = (times >= t_start) & (times <= t_end)
             if mask.sum() < 4:
                 mask = np.ones(len(times), dtype=bool)
@@ -1102,13 +1281,11 @@ class CurvesROIPage(ctk.CTkFrame):
             times_fit  = times[mask]
             values_fit = values[mask]
 
-            # 3. 1-based indices
             baseline_idx = int(np.argmin(np.abs(times - t_start))) + 1
             washout_idx  = int(np.argmin(np.abs(times - t_end)))   + 1
             baseline_idx = max(1, min(baseline_idx, len(times)))
             washout_idx  = max(baseline_idx, min(washout_idx, len(times)))
 
-            # Update entry displays
             block.var_baseline.set(str(baseline_idx))
             block.var_washout.set(str(washout_idx))
 
@@ -1116,7 +1293,6 @@ class CurvesROIPage(ctk.CTkFrame):
                   f"t={t_start:.2f}–{t_end:.2f}s  "
                   f"idx={baseline_idx}–{washout_idx}  pts={mask.sum()}")
 
-            # 4. run fit (primary fixed, safe fallback)
             try:
                 result = _get_fitted_curve_fixed(
                     sample_curve=values,
@@ -1126,7 +1302,7 @@ class CurvesROIPage(ctk.CTkFrame):
                 )
             except Exception as primary_exc:
                 print(f"  Primary fit failed ({primary_exc}); safe fallback …")
-                result = get_fitted_curve_safe(
+                result = get_fitted_curve(
                     sample_curve=values,
                     sample_time=times,
                     baseline=baseline_idx,
@@ -1137,16 +1313,9 @@ class CurvesROIPage(ctk.CTkFrame):
                   f"K={result.k:.3f}, α={result.alpha:.3f}, β={result.beta:.3f}, "
                   f"AUC={result.auc:.1f}")
 
-            # 5. trim fitted curve to display window
             ft, fc = result.fitted_time, result.fitted_curve
-            fit_mask = (ft >= t_start) & (ft <= t_end)
-            if fit_mask.sum() < 2:
-                fit_mask = np.ones(len(ft), dtype=bool)
-            ft_d = ft[fit_mask]
-            fc_d = fc[fit_mask]
 
-            # 6. tight axis limits
-            all_y  = np.concatenate([values_fit, fc_d])
+            all_y  = np.concatenate([values, fc])
             y_min, y_max = float(np.min(all_y)), float(np.max(all_y))
             y_pad  = max(1.0, (y_max - y_min) * 0.08)
             y_lo   = y_min - y_pad
@@ -1163,7 +1332,10 @@ class CurvesROIPage(ctk.CTkFrame):
             y_lo = float(y_ticks[0])  - y_pad * 0.5
             y_hi = float(y_ticks[-1]) + y_pad * 0.5
 
-            # 7. redraw
+            # ── Save snapshot BEFORE redrawing so Undo can restore this state ──
+            self._push_undo_snapshot(block)
+
+            # ── Clear and redraw the axes cleanly ──────────────────────────────
             block.ax.cla()
             block.ax.set_facecolor("black")
             block.ax.set_xlabel("Time (s)", color="white")
@@ -1172,27 +1344,33 @@ class CurvesROIPage(ctk.CTkFrame):
                 spine.set_color("white")
             block.ax.tick_params(colors="white")
 
-            colour = _COLOUR.get(block.lesion, "white")
-            block.ax.plot(times_fit, values_fit, "o", color=colour,
-                          markersize=5, alpha=0.85,
-                          label=f"{'Pre' if block.lesion == 'pre' else 'Post'}-Lesion Sampled")
-            block.ax.plot(ft_d, fc_d, "-", color=colour, linewidth=2,
-                          label=f"{'Pre' if block.lesion == 'pre' else 'Post'}-Lesion Fitted")
-            block.ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
+            # ── Sampled dots — blue for pre, orange for post ──────────────────
+            dot_color   = "dodgerblue" if block.lesion == "pre" else "darkorange"
+            dot_label   = "Pre-Lesion Sampled" if block.lesion == "pre" else "Post-Lesion Sampled"
 
-            # 8. lock axes
-            block.ax.autoscale(False)
-            block.ax.set_xlim(t_start, t_end)
+            block.ax.plot(times, values, "o",
+                          color=dot_color, alpha=0.9, markersize=5,
+                          label=dot_label, zorder=4)
+
+            # ── Fitted curve: mediumpurple ─────────────────────────────────────
+            fit_label = "Pre-Lesion Fitted" if block.lesion == "pre" else "Post-Lesion Fitted"
+            block.ax.plot(ft, fc,
+                          linestyle="-", color="mediumpurple",
+                          linewidth=2.5, label=fit_label, zorder=5)
+
+            block.ax.set_xlim(times.min(), times.max())
             block.ax.set_ylim(y_lo, y_hi)
             block.ax.set_yticks(y_ticks)
-            x_ticks = np.unique(np.linspace(t_start, t_end, 11).astype(int))
-            block.ax.set_xticks(x_ticks)
-            block.ax.set_xticklabels([str(int(t)) for t in x_ticks])
 
-            # 9. reconfigure sliders
+            full_ticks = np.unique(np.linspace(times.min(), times.max(), 11).astype(int))
+            block.ax.set_xticks(full_ticks)
+            block.ax.set_xticklabels([str(int(t)) for t in full_ticks])
+
+            block.ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
+
             n_steps = max(1, mask.sum() - 1)
-            block.s_start.configure(from_=t_start, to=t_end, number_of_steps=n_steps)
-            block.s_end.configure(from_=t_start,   to=t_end, number_of_steps=n_steps)
+            block.s_start.configure(from_=times.min(), to=times.max(), number_of_steps=n_steps)
+            block.s_end.configure(from_=times.min(),   to=times.max(), number_of_steps=n_steps)
             block.var_start.set(t_start)
             block.var_end.set(t_end)
 
@@ -1200,8 +1378,7 @@ class CurvesROIPage(ctk.CTkFrame):
             block.end_line   = block.ax.axvline(t_end,   color=THEME["accent"], linewidth=2, visible=False)
 
             block.canvas.draw()
-            print(f"  Plotted [{block.lesion}]: {mask.sum()} dots, "
-                  f"{fit_mask.sum()} fitted pts, y=[{y_lo:.1f}, {y_hi:.1f}]")
+            print(f"  Plotted [{block.lesion}]: {mask.sum()} dots, y=[{y_lo:.1f}, {y_hi:.1f}]")
 
         except Exception as exc:
             import traceback
@@ -1254,7 +1431,7 @@ class CurvesROIPage(ctk.CTkFrame):
             return
 
         from tkinter import simpledialog
-        idx         = block.selected_idx
+        idx          = block.selected_idx
         current_time = block.times[idx]
         current_hu   = block.values[idx]
 
@@ -1299,7 +1476,7 @@ class CurvesROIPage(ctk.CTkFrame):
     def _clear_fitted_curve(self, block) -> None:
         roi = self.pre_roi if block.lesion == "pre" else self.post_roi
         if roi:
-            roi.fitted_curve      = []
+            roi.fitted_curve       = []
             roi.fitted_time_points = []
 
     def _restore_range_lines(self, block) -> None:
