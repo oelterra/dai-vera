@@ -94,16 +94,9 @@ def _configure_axes(
 # Public plotting API
 # ---------------------------------------------------------------------------
 
-def plot_sampled_curve(
-    ax:          Axes,
-    times:       np.ndarray,
-    values:      np.ndarray,
-    lesion_type: str,
-    time_unit:   str = "s",
-) -> None:
-    times  = np.asarray(times,  dtype=float).flatten()
+def plot_sampled_curve(ax, times, values, lesion_type, time_unit="s"):
+    times  = np.asarray(times, dtype=float).flatten()
     values = np.asarray(values, dtype=float).flatten()
-    colour = _COLOUR.get(lesion_type, "white")
 
     _clear_layer(ax, _TAG_SAMPLED)
     _clear_layer(ax, _TAG_FITTED)
@@ -111,53 +104,53 @@ def plot_sampled_curve(
 
     _configure_axes(ax, times, values, time_unit)
 
+    # purple curve
     line_path, = ax.plot(
         times, values, "-",
-        color=colour,
-        linewidth=1.8,
-        alpha=0.7
+        color="mediumpurple",
+        linewidth=2,
+        alpha=0.9
     )
-    line_path.set_gid(_TAG_SAMPLED)  # Crucial for the clearing logic
+    line_path.set_gid(_TAG_SAMPLED)
 
-    # 2. Draw the data points on top
+    # green points
     line_pts, = ax.plot(
         times, values, "o",
-        color=colour,
-        markersize=5,
-        alpha=0.9,
-        label=_LABEL_SAMPLED.get(lesion_type, "Sampled")
+        color="limegreen",
+        markersize=6,
+        alpha=1.0,
+        label="Sampled Points"
     )
-    line_pts.set_gid(_TAG_SAMPLED)  # Crucial for the clearing logic
+    line_pts.set_gid(_TAG_SAMPLED)
 
     _update_legend(ax)
     ax.figure.canvas.draw_idle()
 
+def plot_fitted_overlay(ax, fitted_time, fitted_curve, lesion_type):
+    fitted_time  = np.asarray(fitted_time).flatten()
+    fitted_curve = np.asarray(fitted_curve).flatten()
 
-def plot_fitted_overlay(
-    ax:           Axes,
-    fitted_time:  np.ndarray,
-    fitted_curve: np.ndarray,
-    lesion_type:  str,
-) -> None:
-    fitted_time  = np.asarray(fitted_time,  dtype=float).flatten()
-    fitted_curve = np.asarray(fitted_curve, dtype=float).flatten()
-    colour = _COLOUR.get(lesion_type, "cyan")
-
+    # Clean up existing layers
+    _clear_layer(ax, _TAG_SAMPLED)
     _clear_layer(ax, _TAG_FITTED)
     _remove_legend(ax)
 
-    (line,) = ax.plot(
-        fitted_time, fitted_curve, "-",
-        color=colour, linewidth=2,
-        label=_LABEL_FITTED.get(lesion_type, "Fitted"),
+    # Plot ONLY the fitted line
+    line_path, = ax.plot(
+        fitted_time,
+        fitted_curve,
+        "-", # This ensures a solid line
+        color="mediumpurple",
+        linewidth=2.5,
+        label="Fitted Curve"
     )
-    line.set_gid(_TAG_FITTED)
+    line_path.set_gid(_TAG_FITTED)
 
+    # Update UI elements
     _update_legend(ax)
     ax.figure.canvas.draw_idle()
 
 
-# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
