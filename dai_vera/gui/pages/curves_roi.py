@@ -907,29 +907,111 @@ class CurvesROIPage(ctk.CTkFrame):
         self.img_canvas.tag_bind("drag_point", "<ButtonRelease-1>", on_release)
 
     def _sync_curve_block_from_data(self, block, times: list, values: list) -> None:
+        """Sync sliders and range lines only — does NOT touch axis limits."""
         if not times:
             return
-        times_arr  = np.asarray(times, dtype=float)
-        values_arr = np.asarray(values, dtype=float)
+        times_arr = np.asarray(times, dtype=float)
 
         t_start = float(times_arr[0])
-        t_end   = float(times_arr[-1])
-        v_min   = float(np.min(values_arr))
-        v_max   = float(np.max(values_arr))
-        y_pad   = max(1.0, (v_max - v_min) * 0.08)
-
-        block.ax.set_xlim(t_start, t_end)
-        block.ax.set_ylim(v_min - y_pad, v_max + y_pad)
+        t_end = float(times_arr[-1])
 
         n_steps = max(1, len(times_arr) - 1)
         block.var_start.set(t_start)
         block.var_end.set(t_end)
         block.s_start.configure(from_=t_start, to=t_end, number_of_steps=n_steps)
-        block.s_end.configure(from_=t_start,   to=t_end, number_of_steps=n_steps)
+        block.s_end.configure(from_=t_start, to=t_end, number_of_steps=n_steps)
 
         block.start_line.set_xdata([t_start, t_start])
         block.end_line.set_xdata([t_end, t_end])
 
+
+    # ── shared axis helper ────────────────────────────────────────────────────
+    def _apply_tight_limits(self, block, times_arr: np.ndarray, values_arr: np.ndarray) -> None:
+        """Keep axis limits consistent used by set-lesion, fit-curve, and undo."""
+        t_lo = float(times_arr.min())
+        t_hi = float(times_arr.max())
+        v_lo = float(values_arr.min())
+        v_hi = float(values_arr.max())
+        v_pad = max(1.0, (v_hi - v_lo) * 0.10)
+        block.ax.set_xlim(t_lo, t_hi)
+        block.ax.set_ylim(v_lo - v_pad, v_hi + v_pad)
+
+    def _reset_ax_style(self, block) -> None:
+        """Clear axes and restore consistent dark styling."""
+        block.ax.cla()
+        block.ax.autoscale(enable=False)  # ← add this line
+        block.ax.set_facecolor("black")
+        block.ax.set_xlabel("Time (s)", color="white")
+        block.ax.set_ylabel("Enhancement (HU)", color="white")
+        for spine in block.ax.spines.values():
+            spine.set_color("white")
+        block.ax.tick_params(colors="white")
+        block.points_line = None
+
+    def _draw_curve_to_block(self, block, times: np.ndarray, values: np.ndarray,
+                             ft=None, fc=None, mask=None) -> None:
+        self._reset_ax_style(block)
+
+        dot_color = "dodgerblue" if block.lesion == "pre" else "darkorange"
+        dot_label = "Pre-Lesion Sampled" if block.lesion == "pre" else "Post-Lesion Sampled"
+
+        if mask is not None:
+            outside = ~mask
+            if outside.any():
+                block.ax.plot(times[outside], values[outside], "o",
+                              color=dot_color, alpha=0.60, markersize=4, zorder=3)
+            block.ax.plot(times[mask], values[mask], "o",
+                          color=dot_color, alpha=0.95, markersize=5,
+                          label=dot_label, zorder=4)
+        else:
+            block.ax.plot(times, values, "o",
+                          color=dot_color, alpha=0.95, markersize=5,
+                          label=dot_label, zorder=4)
+
+        if ft is not None and fc is not None:
+            fit_label = "Pre-Lesion Fitted" if block.lesion == "pre" else "Post-Lesion Fitted"
+            block.ax.plot(ft, fc, linestyle="-", color="mediumpurple",
+                          linewidth=2.5, label=fit_label, zorder=5)
+
+        # ── compute limits from ALL data that will be visible ──
+        all_y = np.concatenate([values, fc]) if fc is not None else values.copy()
+        t_lo = float(times.min())
+        t_hi = float(times.max())
+        v_lo = float(all_y.min())
+        v_hi = float(all_y.max())
+        v_range = v_hi - v_lo
+        v_pad = max(5.0, v_range * 0.12)  # at least 5 HU padding, 12% of range
+        y_lo = v_lo - v_pad
+        y_hi = v_hi + v_pad
+
+        print(f"  [_draw_curve_to_block] v_lo={v_lo:.1f} v_hi={v_hi:.1f} "
+              f"y_lo={y_lo:.1f} y_hi={y_hi:.1f}")
+
+        # disable autoscale FIRST, then set limits so nothing can override them
+        block.ax.autoscale(enable=False)
+        block.ax.set_xlim(t_lo, t_hi)
+        block.ax.set_ylim(y_lo, y_hi)
+
+        tick_interval = max(50, int(round((y_hi - y_lo) / 6 / 50) * 50))
+        y_tick_start = 0
+        y_tick_end = int(np.ceil(y_hi / tick_interval) * tick_interval) + tick_interval*0.5
+        block.ax.set_yticks(np.arange(y_tick_start, y_tick_end, tick_interval))
+
+        block.ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
+
+        # ── slider sync ──
+        n_steps = max(1, len(times) - 1)
+        block.var_start.set(t_lo)
+        block.var_end.set(t_hi)
+        block.s_start.configure(from_=t_lo, to=t_hi, number_of_steps=n_steps)
+        block.s_end.configure(from_=t_lo, to=t_hi, number_of_steps=n_steps)
+
+        t_start = float(block.var_start.get())
+        t_end = float(block.var_end.get())
+        block.start_line = block.ax.axvline(t_start, color=THEME["accent"], linewidth=2, visible=False)
+        block.end_line = block.ax.axvline(t_end, color=THEME["accent"], linewidth=2, visible=False)
+
+        block.canvas.draw()
     # =========================================================================
     # Undo snapshot helpers
     # =========================================================================
@@ -962,25 +1044,13 @@ class CurvesROIPage(ctk.CTkFrame):
         block._undo_stack.append(snapshot)
 
     def _pop_undo_snapshot(self, block) -> bool:
-        """
-        Restore the most recent snapshot.  Returns True if something was restored.
-        Does NOT touch block.times / block.values — raw data is never removed by undo.
-        """
         if not block._undo_stack:
             return False
 
         snapshot = block._undo_stack.pop()
 
-        # Clear current axes content, preserve styling
-        block.ax.cla()
-        block.ax.set_facecolor("black")
-        block.ax.set_xlabel("Time (s)", color="white")
-        block.ax.set_ylabel("Enhancement (HU)", color="white")
-        for spine in block.ax.spines.values():
-            spine.set_color("white")
-        block.ax.tick_params(colors="white")
+        self._reset_ax_style(block)  # clears + nulls points_line
 
-        # Re-draw every saved artist
         for ld in snapshot["lines"]:
             (line,) = block.ax.plot(
                 ld["xdata"], ld["ydata"],
@@ -995,13 +1065,11 @@ class CurvesROIPage(ctk.CTkFrame):
                 zorder=ld["zorder"],
             )
 
-        # Restore axis limits and slider positions
         block.ax.set_xlim(snapshot["xlim"])
         block.ax.set_ylim(snapshot["ylim"])
         block.var_start.set(snapshot["var_start"])
         block.var_end.set(snapshot["var_end"])
 
-        # Recreate the start/end marker lines so they stay referenced
         block.start_line = block.ax.axvline(
             snapshot["var_start"], color=THEME["accent"], linewidth=2, visible=False
         )
@@ -1069,19 +1137,18 @@ class CurvesROIPage(ctk.CTkFrame):
         self._movie_after_id = self.after(delay, self._movie_loop)
 
     def _curve_undo(self, block) -> None:
-        """
-        Undo the last *visual* change (fit, overlay, etc.).
-        Raw data points (block.times / block.values) are NEVER removed here.
-        """
+        """Undo the last visual change. Raw data is never removed."""
         if not self._pop_undo_snapshot(block):
             print(f"[{block.lesion}] Nothing to undo.")
 
     def _curve_clear(self, block) -> None:
-        block.times        = []
-        block.values       = []
+        block.times = []
+        block.values = []
         block.selected_idx = None
         block._undo_stack.clear()
-        self._redraw_curve(block)
+        block.points_line = None
+        self._reset_ax_style(block)
+        block.canvas.draw_idle()
 
     # =========================================================================
     # Set Lesion
@@ -1212,47 +1279,16 @@ class CurvesROIPage(ctk.CTkFrame):
         block.selected_idx = None
         block._undo_stack.clear()  # fresh data → clear old undo history
 
-        block.ax.cla()
-        block.ax.set_facecolor("black")
-        block.ax.set_xlabel("Time (s)", color="white")
-        block.ax.set_ylabel("Enhancement (HU)", color="white")
-        for spine in block.ax.spines.values():
-            spine.set_color("white")
-        block.ax.tick_params(colors="white")
+        block = self.pre_lesion_block if lesion == "pre" else self.post_lesion_block
+        block.times = interp_times.tolist()
+        block.values = interp_vals.tolist()
+        block.selected_idx = None
+        block._undo_stack.clear()
 
-        times_arr  = np.asarray(block.times,  dtype=float)
+        times_arr = np.asarray(block.times, dtype=float)
         values_arr = np.asarray(block.values, dtype=float)
 
-        # ── Initial draw: sampled dots only (mirrors MATLAB behaviour) ───────────
-        # No connecting line or pre-fit — the curve only appears after
-        # the user clicks "Fit Curve" (gamma variate fit).
-        dot_color = "dodgerblue" if lesion == "pre" else "darkorange"
-        dot_label = "Pre-Lesion Sampled" if lesion == "pre" else "Post-Lesion Sampled"
-        block.ax.plot(times_arr, values_arr, "o",
-                      color=dot_color, markersize=5, alpha=0.95,
-                      label=dot_label)
-
-        # Lock axis limits so Undo never resets to defaults
-        block.initial_xlim = (float(times_arr.min()), float(times_arr.max()))
-        v_range = float(values_arr.max() - values_arr.min())
-        block.initial_ylim = (
-            float(values_arr.min()) - v_range * 0.1,
-            float(values_arr.max()) + v_range * 0.1,
-        )
-
-        block.ax.set_xlim(block.initial_xlim)
-        block.ax.set_ylim(block.initial_ylim)
-
-        block.ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
-
-        self._sync_curve_block_from_data(block, block.times, block.values)
-
-        # Redraw markers (Start/End lines)
-        block.start_line = block.ax.axvline(block.var_start.get(), color=THEME["accent"], linewidth=2)
-        block.end_line   = block.ax.axvline(block.var_end.get(),   color=THEME["accent"], linewidth=2)
-
-        block.canvas.draw()
-
+        self._draw_curve_to_block(block, times_arr, values_arr)
     # Fitting handler
     # =========================================================================
 
@@ -1332,53 +1368,19 @@ class CurvesROIPage(ctk.CTkFrame):
             y_lo = float(y_ticks[0])  - y_pad * 0.5
             y_hi = float(y_ticks[-1]) + y_pad * 0.5
 
-            # ── Save snapshot BEFORE redrawing so Undo can restore this state ──
+            # Save snapshot BEFORE redrawing
             self._push_undo_snapshot(block)
-
-            # ── Clear and redraw the axes cleanly ──────────────────────────────
-            block.ax.cla()
-            block.ax.set_facecolor("black")
-            block.ax.set_xlabel("Time (s)", color="white")
-            block.ax.set_ylabel("Enhancement (HU)", color="white")
-            for spine in block.ax.spines.values():
-                spine.set_color("white")
-            block.ax.tick_params(colors="white")
-
-            # ── Sampled dots — blue for pre, orange for post ──────────────────
-            dot_color   = "dodgerblue" if block.lesion == "pre" else "darkorange"
-            dot_label   = "Pre-Lesion Sampled" if block.lesion == "pre" else "Post-Lesion Sampled"
-
-            block.ax.plot(times, values, "o",
-                          color=dot_color, alpha=0.9, markersize=5,
-                          label=dot_label, zorder=4)
-
-            # ── Fitted curve: mediumpurple ─────────────────────────────────────
-            fit_label = "Pre-Lesion Fitted" if block.lesion == "pre" else "Post-Lesion Fitted"
-            block.ax.plot(ft, fc,
-                          linestyle="-", color="mediumpurple",
-                          linewidth=2.5, label=fit_label, zorder=5)
-
-            block.ax.set_xlim(times.min(), times.max())
-            block.ax.set_ylim(y_lo, y_hi)
-            block.ax.set_yticks(y_ticks)
-
-            full_ticks = np.unique(np.linspace(times.min(), times.max(), 11).astype(int))
-            block.ax.set_xticks(full_ticks)
-            block.ax.set_xticklabels([str(int(t)) for t in full_ticks])
-
-            block.ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
 
             n_steps = max(1, mask.sum() - 1)
             block.s_start.configure(from_=times.min(), to=times.max(), number_of_steps=n_steps)
-            block.s_end.configure(from_=times.min(),   to=times.max(), number_of_steps=n_steps)
+            block.s_end.configure(from_=times.min(), to=times.max(), number_of_steps=n_steps)
             block.var_start.set(t_start)
             block.var_end.set(t_end)
 
-            block.start_line = block.ax.axvline(t_start, color=THEME["accent"], linewidth=2, visible=False)
-            block.end_line   = block.ax.axvline(t_end,   color=THEME["accent"], linewidth=2, visible=False)
-
-            block.canvas.draw()
-            print(f"  Plotted [{block.lesion}]: {mask.sum()} dots, y=[{y_lo:.1f}, {y_hi:.1f}]")
+            self._draw_curve_to_block(block, times, values, ft=ft, fc=fc, mask=mask)
+            # print(f"  Plotted [{block.lesion}]: {mask.sum()} dots")
+            print(f"  Plotted [{block.lesion}]: {mask.sum()} dots, y=[consistent limits]")
+            # print(f"  Plotted [{block.lesion}]: {mask.sum()} dots, y=[{y_lo:.1f}, {y_hi:.1f}]")
 
         except Exception as exc:
             import traceback
