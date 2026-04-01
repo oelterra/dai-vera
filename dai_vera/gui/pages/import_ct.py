@@ -873,6 +873,11 @@ class ImportCTPage(ctk.CTkFrame):
             self.cta_slice_index.set(1)
             self.state.cta_time = 1
             self.state.cta_slice = 1
+            self.state.cta_coronary_mask = None
+            self.state.cta_coronary_mask_path = ""
+            self.state.cta_segmentation_status = "idle"
+            self.state.cta_segmentation_error = ""
+            self.state.cta_segmentation_in_progress = False
             if vol.get("slice_thickness") is not None:
                 self.state.cta_slice_thickness = float(vol["slice_thickness"])
 
@@ -1125,6 +1130,8 @@ class ImportCTPage(ctk.CTkFrame):
 
         img = pixels[t_idx, z_idx]
         img8 = self._to_uint8_for_display(img, level=level, width=width)
+        if kind == "CTA":
+            img8 = self._apply_cta_coronary_overlay(img8, z_idx)
 
         cw = max(10, int(upload_canvas.winfo_width()))
         ch = max(10, int(upload_canvas.winfo_height()))
@@ -1172,6 +1179,34 @@ class ImportCTPage(ctk.CTkFrame):
         out = np.clip((img - w_lo) / (w_hi - w_lo), 0, 1)
         out = (out * 255.0).astype(np.uint8)
         return out
+
+    def _apply_cta_coronary_overlay(self, img8: np.ndarray, z_idx: int) -> np.ndarray:
+        mask_volume = getattr(self.state, "cta_coronary_mask", None)
+        if mask_volume is None or not getattr(self.state, "show_coronary_overlay", True):
+            return img8
+
+        try:
+            if mask_volume.ndim != 3:
+                raise RuntimeError(f"Expected a 3D coronary mask, got shape {mask_volume.shape}.")
+            if z_idx < 0 or z_idx >= mask_volume.shape[0]:
+                raise RuntimeError("CTA slice index is outside the coronary mask range.")
+
+            mask_slice = np.asarray(mask_volume[z_idx]) > 0
+            if mask_slice.shape != img8.shape:
+                raise RuntimeError(
+                    f"CTA coronary mask slice shape {mask_slice.shape} does not match CTA image shape {img8.shape}."
+                )
+
+            alpha = 0.42
+            base = np.stack([img8, img8, img8], axis=-1).astype(np.float32)
+            red = np.zeros_like(base)
+            red[..., 0] = 255.0
+            mask3 = mask_slice[..., None].astype(np.float32)
+            blended = (base * (1.0 - alpha * mask3)) + (red * (alpha * mask3))
+            return np.clip(blended, 0, 255).astype(np.uint8)
+        except Exception as exc:
+            self.state.cta_segmentation_error = f"Coronary overlay unavailable: {exc}"
+            return img8
 
     def _restore_if_loaded(self):
         if getattr(self.state, "ctp_volume", None):
@@ -1273,6 +1308,11 @@ class ImportCTPage(ctk.CTkFrame):
             self.state.cta_slice = 1
             self.cta_time_index.set(1)
             self.state.cta_time = 1
+            self.state.cta_coronary_mask = None
+            self.state.cta_coronary_mask_path = ""
+            self.state.cta_segmentation_status = "idle"
+            self.state.cta_segmentation_error = ""
+            self.state.cta_segmentation_in_progress = False
             self._configure_sliders_from_volume("CTA", new_vol)
             self._render_current("CTA")
 

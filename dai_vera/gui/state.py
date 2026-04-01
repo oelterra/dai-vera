@@ -13,6 +13,12 @@ class AppState:
     # ---------------- Loaded Volumes ----------------
     ctp_volume: Optional[Dict[str, Any]] = None
     cta_volume: Optional[Dict[str, Any]] = None
+    cta_coronary_mask: Optional[np.ndarray] = None
+    cta_coronary_mask_path: str = ""
+    cta_segmentation_status: str = "idle"
+    cta_segmentation_error: str = ""
+    cta_segmentation_in_progress: bool = False
+    show_coronary_overlay: bool = True
 
     # ---------------- Vendor ----------------
     ctp_vendor: str = ""
