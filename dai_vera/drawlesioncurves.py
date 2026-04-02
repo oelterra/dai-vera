@@ -1,34 +1,33 @@
-""" drawlesioncurves.py
+"""
+drawlesioncurves.py
 --------------------
 Curve plotting helpers and gamma-variate fitting pipeline.
-"""
 
+FIXED: Both start (baseline) and end (washout) constraint points are now
+       passed to fit_modified_gamma_variate so the fitted curve is gently
+       nudged toward those data points.
+"""
 from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass
 from matplotlib.axes import Axes
 
-
 # ---------------------------------------------------------------------------
 # Colour / label maps  (match MATLAB getWingCurve)
 # ---------------------------------------------------------------------------
-
 _COLOUR = {
     "pre":  "dodgerblue",
     "post": "tomato",
 }
-
 _LABEL_SAMPLED = {
     "pre":  "Pre-Lesion Sampled",
     "post": "Post-Lesion Sampled",
 }
-
 _LABEL_FITTED = {
     "pre":  "Pre-Lesion Fitted",
     "post": "Post-Lesion Fitted",
 }
-
 _TAG_SAMPLED = "sampled"
 _TAG_FITTED  = "fitted"
 
@@ -36,7 +35,6 @@ _TAG_FITTED  = "fitted"
 # ---------------------------------------------------------------------------
 # Result dataclass  (defined ONCE)
 # ---------------------------------------------------------------------------
-
 @dataclass
 class FittedCurveResult:
     fitted_curve:               np.ndarray
@@ -55,7 +53,6 @@ class FittedCurveResult:
 # ---------------------------------------------------------------------------
 # Axis configuration  (MATLAB getWingCurve logic)
 # ---------------------------------------------------------------------------
-
 def _y_limits(curve: np.ndarray) -> tuple[float, float]:
     """
     minY = -50
@@ -93,7 +90,6 @@ def _configure_axes(
 # ---------------------------------------------------------------------------
 # Public plotting API
 # ---------------------------------------------------------------------------
-
 def plot_sampled_curve(ax, times, values, lesion_type, time_unit="s"):
     times  = np.asarray(times, dtype=float).flatten()
     values = np.asarray(values, dtype=float).flatten()
@@ -126,6 +122,7 @@ def plot_sampled_curve(ax, times, values, lesion_type, time_unit="s"):
     _update_legend(ax)
     ax.figure.canvas.draw_idle()
 
+
 def plot_fitted_overlay(ax, fitted_time, fitted_curve, lesion_type):
     fitted_time  = np.asarray(fitted_time).flatten()
     fitted_curve = np.asarray(fitted_curve).flatten()
@@ -139,7 +136,7 @@ def plot_fitted_overlay(ax, fitted_time, fitted_curve, lesion_type):
     line_path, = ax.plot(
         fitted_time,
         fitted_curve,
-        "-", # This ensures a solid line
+        "-",
         color="mediumpurple",
         linewidth=2.5,
         label="Fitted Curve"
@@ -153,7 +150,6 @@ def plot_fitted_overlay(ax, fitted_time, fitted_curve, lesion_type):
 
 # Internal helpers
 # ---------------------------------------------------------------------------
-
 def _clear_layer(ax: Axes, tag: str) -> None:
     for line in list(ax.lines):
         if line.get_gid() == tag:
@@ -181,96 +177,11 @@ def _update_legend(ax: Axes) -> None:
 
 
 # ---------------------------------------------------------------------------
-# get_fitted_curve_safe
-# ---------------------------------------------------------------------------
-
-def get_fitted_curve(
-        sample_curve: np.ndarray,
-        sample_time: np.ndarray,
-        baseline: int = 0,
-        washout: int = 0,
-) -> FittedCurveResult:
-    from dai_vera.roi_curve_processing import preprocess_curve, find_baseline
-    from dai_vera.gammavariate import fit_modified_gamma_variate, compute_auc
-
-    # Ensure 1D arrays (Python equivalent of handling isrow/iscolumn)
-    sample_curve = np.asarray(sample_curve, dtype=float).flatten()
-    sample_time = np.asarray(sample_time, dtype=float).flatten()
-
-    # 1. Baseline Logic
-    if baseline != 0:
-        position = int(baseline)
-    else:
-        # findBaseline(sampleCurve)
-        position = find_baseline(sample_curve) + 1
-
-    if position <= 0:
-        position = 1
-
-    # 2. Convert time (ms -> s)
-    if len(sample_time) > 1 and sample_time[1] >= 500:
-        sample_time = sample_time / 1000.0
-
-    # 3. Baseline Subtraction & Washout Point
-    # This matches the MATLAB call to subtractBaseline and getStartingPoint...
-    processed = preprocess_curve(
-        raw_tdc=sample_curve,
-        time_points=sample_time,
-        washout_point=washout if washout != 0 else None,
-        baseline_override=position,
-    )
-
-    baseline_subtracted = processed["subtracted_curve"]
-    baseline_hu_offset = float(processed.get("baseline_value", 0.0))
-    recirc_pos = processed["recirculation_start"]
-
-    # 4. Initial Guesses (Matching your MATLAB code: k=1, alpha=5, beta=1.5)
-    k_init, alpha_init, beta_init = 1.0, 5.0, 1.5
-
-    # 5. Curve Fitting
-    try:
-        fit = fit_modified_gamma_variate(
-            time=sample_time,
-            data=baseline_subtracted,
-            K_init=k_init,
-            alpha_init=alpha_init,
-            beta_init=beta_init,
-            num_points_to_consider=recirc_pos,
-            contrast_arrival_time=position,
-        )
-        converged = fit.converged
-    except Exception as exc:
-        raise RuntimeError(f"fitModifiedGammaVariate failed: {exc}")
-
-    # 6. RMSE Logic (Matches MATLAB: sqrt(immse(fit, linspace(start, end))))
-    # This compares the fit to a straight line from the first to last subtracted point.
-    linear_ref = np.linspace(
-        float(baseline_subtracted[0]),
-        float(baseline_subtracted[-1]),
-        len(fit.fitted_data)
-    )
-    rmse = float(np.sqrt(np.mean((fit.fitted_data - linear_ref) ** 2)))
-
-    auc = compute_auc(fit.fitted_data, fit.stretched_time)
-
-    return FittedCurveResult(
-        fitted_curve=fit.fitted_data + baseline_hu_offset,
-        fitted_time=fit.stretched_time,
-        baseline_subtracted_curve=baseline_subtracted,
-        rmse=rmse,
-        k=fit.k,
-        alpha=fit.alpha,
-        beta=fit.beta,
-        baseline_position=position,
-        recirculation_start=recirc_pos,
-        auc=auc,
-        converged=converged,
-    )
-
-# ---------------------------------------------------------------------------
 # get_fitted_curve  (primary path used by curves_roi_page)
+#
+# FIXED: Both baseline (start) and washout (end) constraint points are now
+#        built and passed to fit_modified_gamma_variate.
 # ---------------------------------------------------------------------------
-
 def get_fitted_curve(
         sample_curve: np.ndarray,
         sample_time: np.ndarray,
@@ -280,26 +191,20 @@ def get_fitted_curve(
     from dai_vera.roi_curve_processing import preprocess_curve, find_baseline
     from dai_vera.gammavariate import fit_modified_gamma_variate, compute_auc
 
-    # Ensure 1D arrays (Python equivalent of handling isrow/iscolumn)
     sample_curve = np.asarray(sample_curve, dtype=float).flatten()
-    sample_time = np.asarray(sample_time, dtype=float).flatten()
+    sample_time  = np.asarray(sample_time,  dtype=float).flatten()
 
-    # 1. Baseline Logic
     if baseline != 0:
         position = int(baseline)
     else:
-        # findBaseline(sampleCurve)
         position = find_baseline(sample_curve) + 1
 
     if position <= 0:
         position = 1
 
-    # 2. Convert time (ms -> s)
     if len(sample_time) > 1 and sample_time[1] >= 500:
         sample_time = sample_time / 1000.0
 
-    # 3. Baseline Subtraction & Washout Point
-    # This matches the MATLAB call to subtractBaseline and getStartingPoint...
     processed = preprocess_curve(
         raw_tdc=sample_curve,
         time_points=sample_time,
@@ -308,48 +213,67 @@ def get_fitted_curve(
     )
 
     baseline_subtracted = processed["subtracted_curve"]
-    baseline_hu_offset = float(processed.get("baseline_value", 0.0))
-    recirc_pos = processed["recirculation_start"]
+    baseline_hu_offset  = float(processed.get("baseline_value", 0.0))
+    recirc_pos          = processed["recirculation_start"]
 
-    # 4. Initial Guesses (Matching your MATLAB code: k=1, alpha=5, beta=1.5)
     k_init, alpha_init, beta_init = 1.0, 5.0, 1.5
 
-    # 5. Curve Fitting
+    # ── Build constraint_points in subtracted space ──
+    constraint_points = []
+
+    # START constraint (baseline slider)
+    if baseline != 0:
+        sc_idx = max(0, min(int(baseline) - 1, len(sample_time) - 1))
+        y_at_start = float(baseline_subtracted[sc_idx])
+        if y_at_start > 0:
+            constraint_points.append((
+                float(sample_time[sc_idx]),
+                y_at_start,
+            ))
+
+    # END constraint (washout slider)
+    if washout != 0:
+        ec_idx = max(0, min(int(washout) - 1, len(sample_time) - 1))
+        y_at_end = float(baseline_subtracted[ec_idx])
+        if y_at_end > 0:
+            constraint_points.append((
+                float(sample_time[ec_idx]),
+                y_at_end,
+            ))
+
     try:
         fit = fit_modified_gamma_variate(
-            time=sample_time,
-            data=baseline_subtracted,
-            K_init=k_init,
-            alpha_init=alpha_init,
-            beta_init=beta_init,
-            num_points_to_consider=recirc_pos,
-            contrast_arrival_time=position,
+            time                   = sample_time,
+            data                   = baseline_subtracted,
+            K_init                 = k_init,
+            alpha_init             = alpha_init,
+            beta_init              = beta_init,
+            num_points_to_consider = recirc_pos,
+            contrast_arrival_time  = position,
+            constraint_points      = constraint_points,
         )
         converged = fit.converged
     except Exception as exc:
         raise RuntimeError(f"fitModifiedGammaVariate failed: {exc}")
 
-    # 6. RMSE Logic (Matches MATLAB: sqrt(immse(fit, linspace(start, end))))
-    # This compares the fit to a straight line from the first to last subtracted point.
     linear_ref = np.linspace(
         float(baseline_subtracted[0]),
         float(baseline_subtracted[-1]),
         len(fit.fitted_data)
     )
     rmse = float(np.sqrt(np.mean((fit.fitted_data - linear_ref) ** 2)))
-
-    auc = compute_auc(fit.fitted_data, fit.stretched_time)
+    auc  = compute_auc(fit.fitted_data, fit.stretched_time)
 
     return FittedCurveResult(
-        fitted_curve=fit.fitted_data + baseline_hu_offset,
-        fitted_time=fit.stretched_time,
-        baseline_subtracted_curve=baseline_subtracted,
-        rmse=rmse,
-        k=fit.k,
-        alpha=fit.alpha,
-        beta=fit.beta,
-        baseline_position=position,
-        recirculation_start=recirc_pos,
-        auc=auc,
-        converged=converged,
+        fitted_curve              = fit.fitted_data + baseline_hu_offset,
+        fitted_time               = fit.stretched_time,
+        baseline_subtracted_curve = baseline_subtracted,
+        rmse                      = rmse,
+        k                         = fit.k,
+        alpha                     = fit.alpha,
+        beta                      = fit.beta,
+        baseline_position         = position,
+        recirculation_start       = recirc_pos,
+        auc                       = auc,
+        converged                 = converged,
     )

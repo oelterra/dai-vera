@@ -1,4 +1,7 @@
-""" curves_roi_page.py  —  FIXED VERSION ------------------------------------- Fixes applied:
+"""
+curves_roi_page.py  —  FIXED VERSION
+-------------------------------------
+Fixes applied:
   1. Search ROI rectangle drawn with correct canvas-scaled coordinates
   2. Search ROI size respects the dropdown (1x1→20px, 2x2→40px, etc.)
   3. Undo re-uses tight axis limits from data — never resets to -50..500
@@ -8,6 +11,8 @@
   7. _redraw_curve keeps tight y-limits and does NOT call _configure_axes
   8. [NEW] Undo is snapshot-based — restores previous visual state, never removes raw points
   9. [NEW] _on_fit_curve uncommented all axis/plot calls so fitted curve renders correctly
+ 10. [NEW] Start constraint uncommented in _get_fitted_curve_fixed so both
+     start and end sliders force the curve through their respective points
 """
 
 from __future__ import annotations
@@ -41,7 +46,8 @@ from dai_vera.curves_roi_logic import window_to_uint8, make_test_volume
 from dai_vera import drawlesioncurves as _dlc
 
 
-def _get_fitted_curve_fixed(sample_curve, sample_time, baseline=0, washout=0):
+def _get_fitted_curve_fixed(sample_curve, sample_time, baseline=0, washout=0,
+                             start_constraint_idx=None, end_constraint_idx=None):
     """
     Thin wrapper around the original get_fitted_curve that ensures
     baseline_hu_offset is always defined before it is referenced.
@@ -60,6 +66,7 @@ def _get_fitted_curve_fixed(sample_curve, sample_time, baseline=0, washout=0):
         position = int(baseline)
     else:
         position = find_baseline(sample_curve) + 1
+
     if position == 0:
         position = 1
 
@@ -73,7 +80,7 @@ def _get_fitted_curve_fixed(sample_curve, sample_time, baseline=0, washout=0):
     baseline_subtracted = processed["subtracted_curve"]
     baseline_pos_0      = processed["baseline_position"]
     recirc_start        = processed["recirculation_start"]
-    baseline_hu_offset  = float(processed.get("baseline_value", 0.0))   # ← FIX
+    baseline_hu_offset  = float(processed.get("baseline_value", 0.0))
 
     peak_value = float(np.max(baseline_subtracted))
     peak_idx   = int(np.argmax(baseline_subtracted))
@@ -84,17 +91,44 @@ def _get_fitted_curve_fixed(sample_curve, sample_time, baseline=0, washout=0):
     alpha_init = 2.0
     beta_init  = max((t_peak - t_at) / (alpha_init + 1.0), 0.5)
 
+    constraint_points = []
+
     print(f"  K_init={K_init:.2f}  α_init={alpha_init:.2f}  β_init={beta_init:.2f}")
+
+    # START constraint — force curve through the start slider's data point
+    if start_constraint_idx is not None:
+        sc_idx = max(0, min(int(start_constraint_idx) - 1, len(sample_time) - 1))
+        y_at_start = float(baseline_subtracted[sc_idx])
+        if y_at_start > 0:  # only constrain if target is positive
+            constraint_points.append((
+                float(sample_time[sc_idx]),
+                y_at_start,
+            ))
+
+    # END constraint — force curve through the end slider's data point
+    if end_constraint_idx is not None:
+        ec_idx = max(0, min(int(end_constraint_idx) - 1, len(sample_time) - 1))
+        y_at_end = float(baseline_subtracted[ec_idx])
+        if y_at_end > 0:  # only constrain if target is positive
+            constraint_points.append((
+                float(sample_time[ec_idx]),
+                y_at_end,
+            ))
+
+    # debug lines
+    print(f"  [CONSTRAINT] full time array: {sample_time}")
+    print(f"  [CONSTRAINT] baseline_subtracted: {baseline_subtracted}")
 
     try:
         fit = fit_modified_gamma_variate(
-            time                   = sample_time,
-            data                   = baseline_subtracted,
-            K_init                 = K_init,
-            alpha_init             = alpha_init,
-            beta_init              = beta_init,
-            num_points_to_consider = recirc_start,
-            contrast_arrival_time  = position,
+            time=sample_time,
+            data=baseline_subtracted,
+            K_init=K_init,
+            alpha_init=alpha_init,
+            beta_init=beta_init,
+            num_points_to_consider=recirc_start,
+            contrast_arrival_time=position,
+            constraint_points=constraint_points,
         )
         converged = fit.converged
     except Exception as exc:
@@ -1279,12 +1313,6 @@ class CurvesROIPage(ctk.CTkFrame):
         block.selected_idx = None
         block._undo_stack.clear()  # fresh data → clear old undo history
 
-        block = self.pre_lesion_block if lesion == "pre" else self.post_lesion_block
-        block.times = interp_times.tolist()
-        block.values = interp_vals.tolist()
-        block.selected_idx = None
-        block._undo_stack.clear()
-
         times_arr = np.asarray(block.times, dtype=float)
         values_arr = np.asarray(block.values, dtype=float)
 
@@ -1335,6 +1363,8 @@ class CurvesROIPage(ctk.CTkFrame):
                     sample_time=times,
                     baseline=baseline_idx,
                     washout=washout_idx,
+                    start_constraint_idx = baseline_idx,
+                    end_constraint_idx = washout_idx,
                 )
             except Exception as primary_exc:
                 print(f"  Primary fit failed ({primary_exc}); safe fallback …")
@@ -1378,9 +1408,7 @@ class CurvesROIPage(ctk.CTkFrame):
             block.var_end.set(t_end)
 
             self._draw_curve_to_block(block, times, values, ft=ft, fc=fc, mask=mask)
-            # print(f"  Plotted [{block.lesion}]: {mask.sum()} dots")
             print(f"  Plotted [{block.lesion}]: {mask.sum()} dots, y=[consistent limits]")
-            # print(f"  Plotted [{block.lesion}]: {mask.sum()} dots, y=[{y_lo:.1f}, {y_hi:.1f}]")
 
         except Exception as exc:
             import traceback
