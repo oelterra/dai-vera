@@ -1,18 +1,8 @@
-"""
-curves_roi_page.py  —  FIXED VERSION
--------------------------------------
-Fixes applied:
-  1. Search ROI rectangle drawn with correct canvas-scaled coordinates
-  2. Search ROI size respects the dropdown (1x1→20px, 2x2→40px, etc.)
-  3. Undo re-uses tight axis limits from data — never resets to -50..500
-  4. Baseline / Washout entries trigger re-fit on Enter / FocusOut
-  5. Baseline/Washout slider sync works bidirectionally
-  6. baseline_hu_offset NameError fixed in get_fitted_curve (patch applied here)
-  7. _redraw_curve keeps tight y-limits and does NOT call _configure_axes
-"""
+""" curves_roi_page.py """
 
 from __future__ import annotations
 
+import copy
 import tkinter as tk
 from typing import Optional, Literal
 
@@ -28,27 +18,50 @@ from dai_vera.gui.theme import THEME, FONTS
 # ── logic imports ──────────────────────────────────────────────────────────────
 from dai_vera.roi_contour import get_contour, get_roi, get_roi_overlayed, ROIObject
 from dai_vera.roi_sampling import get_best_sample
+from dai_vera.roi_curve_processing import preprocess_curve, find_baseline
 from dai_vera.drawlesioncurves import (
     plot_sampled_curve,
     plot_fitted_overlay,
-    get_fitted_curve_safe,
+    get_fitted_curve,
+    FittedCurveResult,
     _COLOUR,
+)
+from dai_vera.gammavariate import (
+    fit_modified_gamma_variate,
+    compute_auc,
 )
 from dai_vera.roi_json import save_roi_as_json
 from dai_vera.curves_roi_logic import window_to_uint8, make_test_volume
 
-# Patch get_fitted_curve inline so baseline_hu_offset is always defined
-from dai_vera import drawlesioncurves as _dlc
 
-
-def _get_fitted_curve_fixed(sample_curve, sample_time, baseline=0, washout=0):
+def _get_fitted_curve_fixed(
+    sample_curve,
+    sample_time,
+    baseline=0,
+    washout=0,
+    start_constraint_idx=None,
+    end_constraint_idx=None,
+):
     """
-    Thin wrapper around the original get_fitted_curve that ensures
-    baseline_hu_offset is always defined before it is referenced.
-    """
-    from dai_vera.roi_curve_processing import preprocess_curve, find_baseline
-    from dai_vera.gammavariate import fit_modified_gamma_variate, compute_auc
+    Fit a modified gamma-variate to the sampled TDC.
 
+    Parameters
+    ----------
+    sample_curve : array-like
+        Raw HU values (NOT baseline-subtracted).
+    sample_time : array-like
+        Time points corresponding to sample_curve.
+    baseline : int
+        1-based index: number of leading points that form the baseline.
+        0 → auto-detect.
+    washout : int
+        1-based index of the last point to include in the fit.
+        0 → use all points.
+
+    Returns
+    -------
+    FittedCurveResult
+    """
     sample_curve = np.asarray(sample_curve, dtype=float).flatten()
     sample_time  = np.asarray(sample_time,  dtype=float).flatten()
 
@@ -56,27 +69,35 @@ def _get_fitted_curve_fixed(sample_curve, sample_time, baseline=0, washout=0):
     if len(sample_time) > 1 and sample_time[1] >= 500:
         sample_time = sample_time / 1000.0
 
-    if baseline != 0:
+    # ── 1. Baseline position ──────────────────────────────────────────
+    if baseline > 0:
         position = int(baseline)
     else:
         position = find_baseline(sample_curve) + 1
-    if position == 0:
-        position = 1
+    position = max(1, position)
 
+    # ── 2. Preprocess (DO NOT truncate — full curve to fitter) ────────
     processed = preprocess_curve(
         raw_tdc           = sample_curve,
         time_points       = sample_time,
-        washout_point     = washout if washout != 0 else None,
+        washout_point     = None,
         baseline_override = position,
     )
 
     baseline_subtracted = processed["subtracted_curve"]
     baseline_pos_0      = processed["baseline_position"]
-    recirc_start        = processed["recirculation_start"]
-    baseline_hu_offset  = float(processed.get("baseline_value", 0.0))   # ← FIX
+    baseline_hu_offset  = float(processed.get("baseline_value", 0.0))
 
-    peak_value = float(np.max(baseline_subtracted))
-    peak_idx   = int(np.argmax(baseline_subtracted))
+    # ── 3. Fitting window ─────────────────────────────────────────────
+    if washout > 0:
+        num_points_to_consider = int(washout)
+    else:
+        num_points_to_consider = len(baseline_subtracted)
+
+    # ── 4. Initial estimates (from fitting window only) ───────────────
+    fit_window = baseline_subtracted[:num_points_to_consider]
+    peak_value = float(np.max(fit_window))
+    peak_idx   = int(np.argmax(fit_window))
     t_at       = float(sample_time[max(0, position - 1)])
     t_peak     = float(sample_time[peak_idx])
 
@@ -84,28 +105,55 @@ def _get_fitted_curve_fixed(sample_curve, sample_time, baseline=0, washout=0):
     alpha_init = 2.0
     beta_init  = max((t_peak - t_at) / (alpha_init + 1.0), 0.5)
 
-    print(f"  K_init={K_init:.2f}  α_init={alpha_init:.2f}  β_init={beta_init:.2f}")
+    # ── 5. Build constraint point at washout ──────────────────────────
+    constraint_points = None
+    if washout > 0 and washout <= len(baseline_subtracted):
+        wo_idx = washout - 1
+        wo_t   = float(sample_time[wo_idx])
+        wo_y   = float(baseline_subtracted[wo_idx])
+        if wo_t > t_at and wo_y >= 0:
+            constraint_points = [(wo_t, wo_y)]
+            print(f"  [CONSTRAINT] washout point: t={wo_t:.2f}s  y={wo_y:.1f} HU")
 
+    # ── 6. Build per-point weights ────────────────────────────────────
+    weights = np.ones(len(sample_time), dtype=float)
+    if washout > 0 and washout <= len(sample_time):
+        weights[washout - 1] = 3.0       # 3x weight on washout point
+    if position > 0 and position <= len(sample_time):
+        weights[position - 1] = 2.0      # 2x weight on baseline point
+
+    print(f"  [FIT] baseline={position}  washout={washout}  "
+          f"n_pts={num_points_to_consider}  t_AT={t_at:.2f}")
+    print(f"  [FIT] K_init={K_init:.2f}  α_init={alpha_init:.2f}  "
+          f"β_init={beta_init:.2f}")
+
+    # ── 7. Fit ────────────────────────────────────────────────────────
     try:
         fit = fit_modified_gamma_variate(
-            time                   = sample_time,
-            data                   = baseline_subtracted,
-            K_init                 = K_init,
-            alpha_init             = alpha_init,
-            beta_init              = beta_init,
-            num_points_to_consider = recirc_start,
-            contrast_arrival_time  = position,
+            time=sample_time,
+            data=baseline_subtracted,
+            K_init=K_init,
+            alpha_init=alpha_init,
+            beta_init=beta_init,
+            num_points_to_consider=num_points_to_consider,
+            contrast_arrival_time=position,
+            constraint_points=constraint_points,
+            weights=weights,
         )
         converged = fit.converged
     except Exception as exc:
         raise RuntimeError(f"fitModifiedGammaVariate failed: {exc}") from exc
 
-    linear_ref = np.linspace(float(baseline_subtracted[0]),
-                             float(baseline_subtracted[-1]), 100)
+    # ── 8. Diagnostics ────────────────────────────────────────────────
+    linear_ref = np.linspace(
+        float(baseline_subtracted[0]),
+        float(baseline_subtracted[-1]),
+        100,
+    )
     rmse = float(np.sqrt(np.mean((fit.fitted_data - linear_ref) ** 2)))
     auc  = compute_auc(fit.fitted_data, fit.stretched_time)
 
-    from dai_vera.drawlesioncurves import FittedCurveResult
+    # ── 9. Add baseline offset back (constant shift, no distortion) ──
     return FittedCurveResult(
         fitted_curve              = fit.fitted_data + baseline_hu_offset,
         fitted_time               = fit.stretched_time,
@@ -115,11 +163,10 @@ def _get_fitted_curve_fixed(sample_curve, sample_time, baseline=0, washout=0):
         alpha                     = fit.alpha,
         beta                      = fit.beta,
         baseline_position         = baseline_pos_0,
-        recirculation_start       = recirc_start,
+        recirculation_start       = num_points_to_consider,
         auc                       = auc,
         converged                 = converged,
     )
-
 
 LesionType = Literal["pre", "post"]
 _SEGMENTATION_WINDOW = 25
@@ -165,6 +212,7 @@ class CurvesROIPage(ctk.CTkFrame):
         self._last_boundary_coords: Optional[np.ndarray] = None
         self._movie_after_id: Optional[str] = None
         self._ctp_photo = None
+        self._ctp_canvas_image_id: Optional[int] = None
         self._current_drag_lesion: Optional[LesionType] = None
         self._ctp_zoom = 1.0
         self._ctp_display_rect: Optional[tuple[float, float, float, float, int, int]] = None
@@ -176,7 +224,7 @@ class CurvesROIPage(ctk.CTkFrame):
         self._ctp_was_dragged = False
 
         # last search-ROI rectangle in IMAGE pixel space (for redraw on slice change)
-        self._last_search_roi_img: Optional[tuple] = None   # (r0,c0,r1,c1)
+        self._last_search_roi_img: Optional[tuple] = None  # (r0,c0,r1,c1)
 
         self.pre_lesion_block  = None
         self.post_lesion_block = None
@@ -500,6 +548,9 @@ class CurvesROIPage(ctk.CTkFrame):
         block.start_line   = ax.axvline(0,  color=THEME["accent"], linewidth=2, visible=False)
         block.end_line     = ax.axvline(10, color=THEME["accent"], linewidth=2, visible=False)
 
+        # ── Snapshot stack for undo (stores visual state, NOT raw point removal) ──
+        block._undo_stack: list[dict] = []
+
         canvas = FigureCanvasTkAgg(fig, master=block)
         w = canvas.get_tk_widget()
         w.configure(bg="black", highlightthickness=0)
@@ -602,12 +653,6 @@ class CurvesROIPage(ctk.CTkFrame):
 
     # -------------------------------------------------------------------------
     def _wire_range_controls(self, block, baseline_entry, washout_entry) -> None:
-        """
-        Bidirectional sync between Start/End sliders and Baseline/Washout entries.
-        Changing either one updates the other AND re-runs the fit automatically.
-        """
-
-        # ── Slider → Entry ────────────────────────────────────────────────
         def on_start_slider(val, b=block):
             t = float(val)
             try:
@@ -641,7 +686,6 @@ class CurvesROIPage(ctk.CTkFrame):
         block.s_start.configure(command=on_start_slider)
         block.s_end.configure(command=on_end_slider)
 
-        # ── Entry → Slider → fit (on Enter or FocusOut) ───────────────────
         def apply_baseline(event=None, b=block):
             if not b.times:
                 return
@@ -759,8 +803,8 @@ class CurvesROIPage(ctk.CTkFrame):
 
         scale = min(cw / max(1, img_w), ch / max(1, img_h))
         scale *= self._ctp_zoom
-        disp_w = max(1, int(img_w * scale))
-        disp_h = max(1, int(img_h * scale))
+        disp_w = int(round(img_w * scale))
+        disp_h = int(round(img_h * scale))
         max_pan_x = max(0.0, (disp_w - cw) / 2.0)
         max_pan_y = max(0.0, (disp_h - ch) / 2.0)
         self._ctp_pan_x = float(np.clip(self._ctp_pan_x, -max_pan_x, max_pan_x))
@@ -774,14 +818,27 @@ class CurvesROIPage(ctk.CTkFrame):
         photo = ImageTk.PhotoImage(pil.resize((disp_w, disp_h), Image.Resampling.LANCZOS))
         self._ctp_photo = photo
 
-        self.img_canvas.delete("all")
-        self.img_canvas.create_image(center_x, center_y, image=photo, anchor="center")
+        if self._ctp_canvas_image_id is None:
+            self._ctp_canvas_image_id = self.img_canvas.create_image(
+                center_x,
+                center_y,
+                image=photo,
+                anchor="center",
+                tags="ctp_base_image",
+            )
+        else:
+            self.img_canvas.coords(self._ctp_canvas_image_id, center_x, center_y)
+            self.img_canvas.itemconfigure(self._ctp_canvas_image_id, image=photo)
+        self.img_canvas.tag_lower("ctp_base_image")
         self.lbl_ctp_source.configure(text="")
 
     def _render_ctp_image(self) -> None:
         vol = getattr(self.state, "ctp_volume", None)
         if not vol:
             self._ctp_display_rect = None
+            if self._ctp_canvas_image_id is not None:
+                self.img_canvas.delete(self._ctp_canvas_image_id)
+                self._ctp_canvas_image_id = None
             self.lbl_ctp_source.configure(text="No CTP loaded")
             return
 
@@ -808,12 +865,10 @@ class CurvesROIPage(ctk.CTkFrame):
         self._overlay_image = None
         self._draw_ctp_canvas_image(img8)
 
-        # redraw the search-ROI rectangle if one exists
         if self._last_search_roi_img is not None:
             self._draw_search_roi_rect(*self._last_search_roi_img, img_h=H, img_w=W)
 
     def _image_to_canvas(self, r_img: int, c_img: int, img_h: int, img_w: int) -> tuple[float, float]:
-        """Convert image pixel (row, col) → canvas pixel (cx, cy)."""
         rect = self._ctp_display_rect
         if rect is None:
             return 0.0, 0.0
@@ -824,13 +879,12 @@ class CurvesROIPage(ctk.CTkFrame):
 
     def _draw_search_roi_rect(self, r0: int, c0: int, r1: int, c1: int,
                                img_h: int, img_w: int) -> None:
-        """Draw the search-window rectangle on the canvas in scaled coordinates."""
         self.img_canvas.delete("search_roi")
         x0, y0 = self._image_to_canvas(r0, c0, img_h, img_w)
         x1, y1 = self._image_to_canvas(r1, c1, img_h, img_w)
         self.img_canvas.create_rectangle(
             x0, y0, x1, y1,
-            outline="white", width=1, tags="search_roi",
+            outline="#00FFFF", width=1, tags="search_roi",
         )
 
     def _render_ctp_image_with(self, image_override: np.ndarray) -> None:
@@ -842,64 +896,43 @@ class CurvesROIPage(ctk.CTkFrame):
         self._overlay_image = image_override
         self._draw_ctp_canvas_image(img8)
 
-    # ── curve redraw (FIXED — keeps tight limits, never resets to -50..500) ──
-
     def _redraw_curve(self, block) -> None:
-        """
-        Redraw only the sampled dots, preserving tight axis limits.
-        Used by Undo and Clear — does NOT call plot_sampled_curve (which would
-        reset axes to the MATLAB -50…500 formula).
-        """
         ax = block.ax
-        ax.cla()
 
-        ax.set_facecolor("black")
-        ax.set_xlabel("Time (s)", color="white")
-        ax.set_ylabel("Enhancement (HU)", color="white")
-        for spine in ax.spines.values():
-            spine.set_color("white")
-        ax.tick_params(colors="white")
-
+        # Only redraw if there are points
         if block.times:
-            times_arr  = np.asarray(block.times, dtype=float)
+            times_arr = np.asarray(block.times, dtype=float)
             values_arr = np.asarray(block.values, dtype=float)
-            colour     = _COLOUR.get(block.lesion, "white")
 
-            ax.plot(times_arr, values_arr, "o",
-                    color=colour, markersize=5, alpha=0.85,
-                    label=f"{'Pre' if block.lesion == 'pre' else 'Post'}-Lesion Sampled")
+            if hasattr(block, 'points_line') and block.points_line is not None:
+                block.points_line.set_data(times_arr, values_arr)
+            else:
+                block.points_line, = ax.plot(times_arr, values_arr, "o",
+                                             color="mediumpurple", markersize=5, alpha=0.85,
+                                             label="Sampled Points")
 
-            # tight limits
             t_s, t_e = float(times_arr[0]), float(times_arr[-1])
-            v_lo, v_hi = float(np.min(values_arr)), float(np.max(values_arr))
-            pad = max(1.0, (v_hi - v_lo) * 0.10)
-            ax.set_xlim(t_s, t_e)
-            ax.set_ylim(v_lo - pad, v_hi + pad)
-
-            x_ticks = np.unique(np.linspace(t_s, t_e, 11).astype(int))
-            ax.set_xticks(x_ticks)
-            ax.set_xticklabels([str(int(t)) for t in x_ticks])
-
-            # update slider range
             n = max(1, len(times_arr) - 1)
             block.s_start.configure(from_=t_s, to=t_e, number_of_steps=n)
-            block.s_end.configure(from_=t_s,   to=t_e, number_of_steps=n)
-            block.var_start.set(t_s)
-            block.var_end.set(t_e)
+            block.s_end.configure(from_=t_s, to=t_e, number_of_steps=n)
+
+            ax.relim()
+            ax.autoscale_view()
+
+            if not hasattr(block, 'start_line') or block.start_line is None:
+                block.start_line = ax.axvline([block.var_start.get()], color=THEME["accent"], linewidth=2,
+                                              visible=False)
+            else:
+                block.start_line.set_xdata([block.var_start.get()])
+
+            if not hasattr(block, 'end_line') or block.end_line is None:
+                block.end_line = ax.axvline([block.var_end.get()], color=THEME["accent"], linewidth=2, visible=False)
+            else:
+                block.end_line.set_xdata([block.var_end.get()])
 
             ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
 
-        block.start_line = ax.axvline(
-            block.var_start.get() if block.times else 0,
-            color=THEME["accent"], linewidth=2, visible=False,
-        )
-        block.end_line = ax.axvline(
-            block.var_end.get() if block.times else 10,
-            color=THEME["accent"], linewidth=2, visible=False,
-        )
         block.canvas.draw_idle()
-
-    # ── canvas overlays ────────────────────────────────────────────────────────
 
     def _draw_crosshair(self, x: int, y: int) -> None:
         self.img_canvas.delete("crosshair")
@@ -933,31 +966,184 @@ class CurvesROIPage(ctk.CTkFrame):
         self.img_canvas.tag_bind("drag_point", "<B1-Motion>",       on_drag)
         self.img_canvas.tag_bind("drag_point", "<ButtonRelease-1>", on_release)
 
-    # ── curve range / axes sync ────────────────────────────────────────────────
-
     def _sync_curve_block_from_data(self, block, times: list, values: list) -> None:
+        """Sync sliders and range lines only — does NOT touch axis limits."""
         if not times:
             return
-        times_arr  = np.asarray(times, dtype=float)
-        values_arr = np.asarray(values, dtype=float)
+        times_arr = np.asarray(times, dtype=float)
 
         t_start = float(times_arr[0])
-        t_end   = float(times_arr[-1])
-        v_min   = float(np.min(values_arr))
-        v_max   = float(np.max(values_arr))
-        y_pad   = max(1.0, (v_max - v_min) * 0.08)
-
-        block.ax.set_xlim(t_start, t_end)
-        block.ax.set_ylim(v_min - y_pad, v_max + y_pad)
+        t_end = float(times_arr[-1])
 
         n_steps = max(1, len(times_arr) - 1)
         block.var_start.set(t_start)
         block.var_end.set(t_end)
         block.s_start.configure(from_=t_start, to=t_end, number_of_steps=n_steps)
-        block.s_end.configure(from_=t_start,   to=t_end, number_of_steps=n_steps)
+        block.s_end.configure(from_=t_start, to=t_end, number_of_steps=n_steps)
 
         block.start_line.set_xdata([t_start, t_start])
         block.end_line.set_xdata([t_end, t_end])
+
+
+    # ── shared axis helper ────────────────────────────────────────────────────
+    def _apply_tight_limits(self, block, times_arr: np.ndarray, values_arr: np.ndarray) -> None:
+        """Keep axis limits consistent used by set-lesion, fit-curve, and undo."""
+        t_lo = float(times_arr.min())
+        t_hi = float(times_arr.max())
+        v_lo = float(values_arr.min())
+        v_hi = float(values_arr.max())
+        v_pad = max(1.0, (v_hi - v_lo) * 0.10)
+        block.ax.set_xlim(t_lo, t_hi)
+        block.ax.set_ylim(v_lo - v_pad, v_hi + v_pad)
+
+    def _reset_ax_style(self, block) -> None:
+        """Clear axes and restore consistent dark styling."""
+        block.ax.cla()
+        block.ax.autoscale(enable=False)
+        block.ax.set_facecolor("black")
+        block.ax.set_xlabel("Time (s)", color="white")
+        block.ax.set_ylabel("Enhancement (HU)", color="white")
+        for spine in block.ax.spines.values():
+            spine.set_color("white")
+        block.ax.tick_params(colors="white")
+        block.points_line = None
+
+    def _draw_curve_to_block(self, block, times: np.ndarray, values: np.ndarray,
+                             ft=None, fc=None, mask=None) -> None:
+        self._reset_ax_style(block)
+
+        dot_color = "dodgerblue" if block.lesion == "pre" else "darkorange"
+        dot_label = "Pre-Lesion Sampled" if block.lesion == "pre" else "Post-Lesion Sampled"
+
+        if mask is not None:
+            outside = ~mask
+            if outside.any():
+                block.ax.plot(times[outside], values[outside], "o",
+                              color=dot_color, alpha=0.60, markersize=4, zorder=3)
+            block.ax.plot(times[mask], values[mask], "o",
+                          color=dot_color, alpha=0.95, markersize=5,
+                          label=dot_label, zorder=4)
+        else:
+            block.ax.plot(times, values, "o",
+                          color=dot_color, alpha=0.95, markersize=5,
+                          label=dot_label, zorder=4)
+
+        if ft is not None and fc is not None:
+            fit_label = "Pre-Lesion Fitted" if block.lesion == "pre" else "Post-Lesion Fitted"
+            # block.ax.plot(ft, fc, linestyle="-", color="mediumpurple",
+            #               linewidth=2.5, label=fit_label, zorder=5)
+            fit_color = "seagreen" if block.lesion == "pre" else "crimson"
+            fit_label = "Pre-Lesion Fitted" if block.lesion == "pre" else "Post-Lesion Fitted"
+            block.ax.plot(ft, fc, linestyle="-", color=fit_color,
+                          linewidth=2.5, label=fit_label, zorder=5)
+
+        # ── compute limits from ALL data that will be visible ──
+        all_y = np.concatenate([values, fc]) if fc is not None else values.copy()
+        t_lo = float(times.min())
+        t_hi = float(times.max())
+        v_lo = float(all_y.min())
+        v_hi = float(all_y.max())
+        v_range = v_hi - v_lo
+        v_pad = max(5.0, v_range * 0.12)  # at least 5 HU padding, 12% of range
+        y_lo = v_lo - v_pad
+        y_hi = v_hi + v_pad
+
+        print(f"  [_draw_curve_to_block] v_lo={v_lo:.1f} v_hi={v_hi:.1f} "
+              f"y_lo={y_lo:.1f} y_hi={y_hi:.1f}")
+
+        # disable autoscale FIRST, then set limits so nothing can override them
+        block.ax.autoscale(enable=False)
+        block.ax.set_xlim(t_lo, t_hi)
+        block.ax.set_ylim(y_lo, y_hi)
+
+        tick_interval = max(50, int(round((y_hi - y_lo) / 6 / 50) * 50))
+        y_tick_start = 0
+        y_tick_end = int(np.ceil(y_hi / tick_interval) * tick_interval) + tick_interval*0.5
+        block.ax.set_yticks(np.arange(y_tick_start, y_tick_end, tick_interval))
+
+        block.ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
+
+        # ── slider sync ──
+        n_steps = max(1, len(times) - 1)
+        block.var_start.set(t_lo)
+        block.var_end.set(t_hi)
+        block.s_start.configure(from_=t_lo, to=t_hi, number_of_steps=n_steps)
+        block.s_end.configure(from_=t_lo, to=t_hi, number_of_steps=n_steps)
+
+        t_start = float(block.var_start.get())
+        t_end = float(block.var_end.get())
+        block.start_line = block.ax.axvline(t_start, color=THEME["accent"], linewidth=2, visible=False)
+        block.end_line = block.ax.axvline(t_end, color=THEME["accent"], linewidth=2, visible=False)
+
+        block.canvas.draw()
+    # =========================================================================
+    # Undo snapshot helpers
+    # =========================================================================
+
+    def _push_undo_snapshot(self, block) -> None:
+        """Save current visual state (axes contents + limits) onto the undo stack."""
+        snapshot = {
+            "xlim":     block.ax.get_xlim(),
+            "ylim":     block.ax.get_ylim(),
+            "var_start": block.var_start.get(),
+            "var_end":   block.var_end.get(),
+            # Serialise every artist on the axes so we can restore them
+            "lines": [
+                {
+                    "xdata":     list(line.get_xdata()),
+                    "ydata":     list(line.get_ydata()),
+                    "color":     line.get_color(),
+                    "linewidth": line.get_linewidth(),
+                    "linestyle": line.get_linestyle(),
+                    "marker":    line.get_marker(),
+                    "markersize":line.get_markersize(),
+                    "alpha":     line.get_alpha(),
+                    "label":     line.get_label(),
+                    "visible":   line.get_visible(),
+                    "zorder":    line.get_zorder(),
+                }
+                for line in block.ax.lines
+            ],
+        }
+        block._undo_stack.append(snapshot)
+
+    def _pop_undo_snapshot(self, block) -> bool:
+        if not block._undo_stack:
+            return False
+
+        snapshot = block._undo_stack.pop()
+
+        self._reset_ax_style(block)  # clears + nulls points_line
+
+        for ld in snapshot["lines"]:
+            (line,) = block.ax.plot(
+                ld["xdata"], ld["ydata"],
+                color=ld["color"],
+                linewidth=ld["linewidth"],
+                linestyle=ld["linestyle"],
+                marker=ld["marker"],
+                markersize=ld["markersize"],
+                alpha=ld["alpha"] if ld["alpha"] is not None else 1.0,
+                label=ld["label"],
+                visible=ld["visible"],
+                zorder=ld["zorder"],
+            )
+
+        block.ax.set_xlim(snapshot["xlim"])
+        block.ax.set_ylim(snapshot["ylim"])
+        block.var_start.set(snapshot["var_start"])
+        block.var_end.set(snapshot["var_end"])
+
+        block.start_line = block.ax.axvline(
+            snapshot["var_start"], color=THEME["accent"], linewidth=2, visible=False
+        )
+        block.end_line = block.ax.axvline(
+            snapshot["var_end"], color=THEME["accent"], linewidth=2, visible=False
+        )
+
+        block.ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
+        block.canvas.draw()
+        return True
 
     # =========================================================================
     # Event handlers
@@ -1014,23 +1200,19 @@ class CurvesROIPage(ctk.CTkFrame):
         self._render_ctp_image()
         self._movie_after_id = self.after(delay, self._movie_loop)
 
-    # ── Undo / Clear ──────────────────────────────────────────────────────────
-
     def _curve_undo(self, block) -> None:
-        """Remove the last sampled point and redraw with tight limits."""
-        if not block.times:
-            return
-        block.times.pop()
-        block.values.pop()
-        block.selected_idx = None
-        self._redraw_curve(block)
+        """Undo the last visual change. Raw data is never removed."""
+        if not self._pop_undo_snapshot(block):
+            print(f"[{block.lesion}] Nothing to undo.")
 
     def _curve_clear(self, block) -> None:
-        """Clear all sampled points."""
-        block.times        = []
-        block.values       = []
+        block.times = []
+        block.values = []
         block.selected_idx = None
-        self._redraw_curve(block)
+        block._undo_stack.clear()
+        block.points_line = None
+        self._reset_ax_style(block)
+        block.canvas.draw_idle()
 
     # =========================================================================
     # Set Lesion
@@ -1066,7 +1248,6 @@ class CurvesROIPage(ctk.CTkFrame):
         t_idx = min(max(0, int(self.var_ctp_time.get())  - 1), T - 1)
         z_idx = min(max(0, int(self.var_ctp_slice.get()) - 1), Z - 1)
 
-        # Canvas coords → image coords
         rect = self._ctp_display_rect
         if rect is None:
             return
@@ -1076,17 +1257,18 @@ class CurvesROIPage(ctk.CTkFrame):
 
         sample_n  = int(self.var_sample_roi.get().split("x")[0].strip())
         search_n  = int(self.var_search_roi.get().split("x")[0].strip())
-        # search window size in pixels: 1x1→20, 2x2→40, 3x3→60, 4x4→80
-        search_px = search_n * 20
+        search_px = max(5, search_n)
 
-        # ── draw search-ROI rectangle on canvas ───────────────────────────
-        half = search_px // 2
-        r0 = max(0, click_row - half);  c0 = max(0, click_col - half)
-        r1 = min(H - 1, click_row + half); c1 = min(W - 1, click_col + half)
+        print("CLICK (row,col):", click_row, click_col)
+
+        half = search_px / 2.0
+        r0 = int(np.floor(click_row - half))
+        r1 = int(np.ceil(click_row + half))
+        c0 = int(np.floor(click_col - half))
+        c1 = int(np.ceil(click_col + half))
         self._last_search_roi_img = (r0, c0, r1, c1)
         self._draw_search_roi_rect(r0, c0, r1, c1, img_h=H, img_w=W)
 
-        # 1. get_best_sample
         sample = get_best_sample(
             x=click_row,
             y=click_col,
@@ -1110,7 +1292,9 @@ class CurvesROIPage(ctk.CTkFrame):
               f"t=[{interp_times[0]:.1f}…{interp_times[-1]:.1f}]  "
               f"val=[{interp_vals[0]:.1f}…{interp_vals[-1]:.1f}]")
 
-        # 2. get_contour
+        print("RAW sampled values:", interp_vals[:10])
+        print("MIN/MAX:", np.min(interp_vals), np.max(interp_vals))
+
         contour = get_contour(
             x=click_row,
             y=click_col,
@@ -1122,7 +1306,6 @@ class CurvesROIPage(ctk.CTkFrame):
         )
         print(f"[{lesion}] radius={contour.radius_cm:.3f} cm  area={contour.area_cm2:.4f} cm²")
 
-        # 3. get_roi
         roi_obj = get_roi(
             study_name=getattr(self.state, "study_name", "Unknown"),
             num_time_points=T,
@@ -1140,7 +1323,6 @@ class CurvesROIPage(ctk.CTkFrame):
         else:
             self.post_roi = roi_obj
 
-        # 4. save JSON
         bundle = {
             "preRoiObject":  self._roi_to_dict(self.pre_roi),
             "postRoiObject": self._roi_to_dict(self.post_roi),
@@ -1148,45 +1330,23 @@ class CurvesROIPage(ctk.CTkFrame):
         path = save_roi_as_json(bundle)
         print(f"ROI saved → {path}")
 
-        # 5. overlay + redraw canvas
         image_2d = pixels[t_idx, z_idx].copy().astype(np.float32)
         overlaid = get_roi_overlayed(image_2d, sx_rows, sx_cols, overlay_value=1500.0)
         self._render_ctp_image_with(overlaid)
-        # redraw search rect on top of new image
         self._draw_search_roi_rect(r0, c0, r1, c1, img_h=H, img_w=W)
         self._draw_crosshair(self.current_x, self.current_y)
         self._add_draggable_point(self.current_x, self.current_y, lesion)
 
-        # 6. plot sampled curve (bypass _configure_axes by plotting manually)
         block = self.pre_lesion_block if lesion == "pre" else self.post_lesion_block
-        block.times        = interp_times.tolist()
-        block.values       = interp_vals.tolist()
+        block.times = interp_times.tolist()
+        block.values = interp_vals.tolist()
         block.selected_idx = None
+        block._undo_stack.clear()  # fresh data → clear old undo history
 
-        block.ax.cla()
-        block.ax.set_facecolor("black")
-        block.ax.set_xlabel("Time (s)", color="white")
-        block.ax.set_ylabel("Enhancement (HU)", color="white")
-        for spine in block.ax.spines.values():
-            spine.set_color("white")
-        block.ax.tick_params(colors="white")
-
-        colour = _COLOUR.get(lesion, "white")
-        times_arr  = np.asarray(block.times, dtype=float)
+        times_arr = np.asarray(block.times, dtype=float)
         values_arr = np.asarray(block.values, dtype=float)
-        block.ax.plot(times_arr, values_arr, "o", color=colour,
-                      markersize=5, alpha=0.85,
-                      label=f"{'Pre' if lesion == 'pre' else 'Post'}-Lesion Sampled")
 
-        self._sync_curve_block_from_data(block, block.times, block.values)
-        block.start_line = block.ax.axvline(
-            block.var_start.get(), color=THEME["accent"], linewidth=2, visible=False)
-        block.end_line = block.ax.axvline(
-            block.var_end.get(), color=THEME["accent"], linewidth=2, visible=False)
-        block.canvas.draw()
-
-        # 7. auto-fit
-        self._on_fit_curve(block)
+        self._draw_curve_to_block(block, times_arr, values_arr)
 
     # =========================================================================
     # Fitting handler
@@ -1200,125 +1360,69 @@ class CurvesROIPage(ctk.CTkFrame):
         try:
             times  = np.asarray(block.times,  dtype=float)
             values = np.asarray(block.values, dtype=float)
+            n_pts  = len(times)
 
-            # 1. read start / end from sliders (these are always in sync with entries)
+            # ── Convert slider positions to 1-based point indices ─────────
             t_start = float(block.var_start.get())
             t_end   = float(block.var_end.get())
 
-            if t_start >= t_end:
-                t_start = float(times[0])
-                t_end   = float(times[-1])
-                block.var_start.set(t_start)
-                block.var_end.set(t_end)
+            # Nearest point index (1-based) for each slider position
+            baseline_idx = int(np.argmin(np.abs(times - t_start))) + 1   # 1-based
+            washout_idx  = int(np.argmin(np.abs(times - t_end)))   + 1   # 1-based
 
-            # 2. trim to [start, end]
-            mask = (times >= t_start) & (times <= t_end)
-            if mask.sum() < 4:
-                mask = np.ones(len(times), dtype=bool)
+            # Clamp
+            baseline_idx = max(1, min(baseline_idx, n_pts))
+            washout_idx  = max(baseline_idx, min(washout_idx, n_pts))
 
-            times_fit  = times[mask]
-            values_fit = values[mask]
+            # If sliders are at extremes → treat as "fit all"
+            if baseline_idx <= 1 and washout_idx >= n_pts:
+                baseline_idx = 0   # 0 = auto-detect
+                washout_idx  = 0   # 0 = use all points
+                print(f"[FitCurve | {block.lesion}] Full fit (no baseline/washout override)")
+            else:
+                print(f"[FitCurve | {block.lesion}] "
+                      f"baseline_idx={baseline_idx}  washout_idx={washout_idx}  "
+                      f"(t={t_start:.2f}–{t_end:.2f}s)")
 
-            # 3. 1-based indices
-            baseline_idx = int(np.argmin(np.abs(times - t_start))) + 1
-            washout_idx  = int(np.argmin(np.abs(times - t_end)))   + 1
-            baseline_idx = max(1, min(baseline_idx, len(times)))
-            washout_idx  = max(baseline_idx, min(washout_idx, len(times)))
-
-            # Update entry displays
+            # Update the entry widgets to show the indices
             block.var_baseline.set(str(baseline_idx))
             block.var_washout.set(str(washout_idx))
 
-            print(f"[FitCurve | {block.lesion}] "
-                  f"t={t_start:.2f}–{t_end:.2f}s  "
-                  f"idx={baseline_idx}–{washout_idx}  pts={mask.sum()}")
-
-            # 4. run fit (primary fixed, safe fallback)
-            try:
-                result = _get_fitted_curve_fixed(
-                    sample_curve=values,
-                    sample_time=times,
-                    baseline=baseline_idx,
-                    washout=washout_idx,
-                )
-            except Exception as primary_exc:
-                print(f"  Primary fit failed ({primary_exc}); safe fallback …")
-                result = get_fitted_curve_safe(
-                    sample_curve=values,
-                    sample_time=times,
-                    baseline=baseline_idx,
-                    washout=washout_idx,
-                )
+            # ── Call the fitter ───────────────────────────────────────────
+            result = _get_fitted_curve_fixed(
+                sample_curve=values,
+                sample_time=times,
+                baseline=baseline_idx,
+                washout=washout_idx,
+            )
 
             print(f"  converged={result.converged}, RMSE={result.rmse:.3f}, "
                   f"K={result.k:.3f}, α={result.alpha:.3f}, β={result.beta:.3f}, "
                   f"AUC={result.auc:.1f}")
 
-            # 5. trim fitted curve to display window
-            ft, fc = result.fitted_time, result.fitted_curve
-            fit_mask = (ft >= t_start) & (ft <= t_end)
-            if fit_mask.sum() < 2:
-                fit_mask = np.ones(len(ft), dtype=bool)
-            ft_d = ft[fit_mask]
-            fc_d = fc[fit_mask]
+            ft = result.fitted_time
+            fc = result.fitted_curve
 
-            # 6. tight axis limits
-            all_y  = np.concatenate([values_fit, fc_d])
-            y_min, y_max = float(np.min(all_y)), float(np.max(all_y))
-            y_pad  = max(1.0, (y_max - y_min) * 0.08)
-            y_lo   = y_min - y_pad
-            y_hi   = y_max + y_pad
+            # NO post-fit vertical shifts — the fitter handles it now
+            # via weights + constraint sweep
 
-            raw_interval  = (y_hi - y_lo) / 5.0
-            magnitude     = 10 ** np.floor(np.log10(max(raw_interval, 1e-9)))
-            nice_interval = max(1, int(round(raw_interval / magnitude) * magnitude))
-            y_ticks = np.arange(
-                int(np.floor(y_lo / nice_interval)) * nice_interval,
-                int(np.ceil(y_hi  / nice_interval)) * nice_interval + nice_interval,
-                nice_interval,
-            )
-            y_lo = float(y_ticks[0])  - y_pad * 0.5
-            y_hi = float(y_ticks[-1]) + y_pad * 0.5
+            # ── Build the mask for dot colouring ──────────────────────────
+            if washout_idx > 0 and baseline_idx > 0:
+                bi_0 = max(0, baseline_idx - 1)   # 0-based
+                wi_0 = min(n_pts, washout_idx)     # exclusive upper
+                mask = np.zeros(n_pts, dtype=bool)
+                mask[bi_0:wi_0] = True
+            else:
+                mask = None   # all points active
 
-            # 7. redraw
-            block.ax.cla()
-            block.ax.set_facecolor("black")
-            block.ax.set_xlabel("Time (s)", color="white")
-            block.ax.set_ylabel("Enhancement (HU)", color="white")
-            for spine in block.ax.spines.values():
-                spine.set_color("white")
-            block.ax.tick_params(colors="white")
+            # ── Save undo snapshot BEFORE redrawing ───────────────────────
+            self._push_undo_snapshot(block)
 
-            colour = _COLOUR.get(block.lesion, "white")
-            block.ax.plot(times_fit, values_fit, "o", color=colour,
-                          markersize=5, alpha=0.85,
-                          label=f"{'Pre' if block.lesion == 'pre' else 'Post'}-Lesion Sampled")
-            block.ax.plot(ft_d, fc_d, "-", color=colour, linewidth=2,
-                          label=f"{'Pre' if block.lesion == 'pre' else 'Post'}-Lesion Fitted")
-            block.ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
+            # ── Redraw ────────────────────────────────────────────────────
+            self._draw_curve_to_block(block, times, values, ft=ft, fc=fc, mask=mask)
 
-            # 8. lock axes
-            block.ax.autoscale(False)
-            block.ax.set_xlim(t_start, t_end)
-            block.ax.set_ylim(y_lo, y_hi)
-            block.ax.set_yticks(y_ticks)
-            x_ticks = np.unique(np.linspace(t_start, t_end, 11).astype(int))
-            block.ax.set_xticks(x_ticks)
-            block.ax.set_xticklabels([str(int(t)) for t in x_ticks])
-
-            # 9. reconfigure sliders
-            n_steps = max(1, mask.sum() - 1)
-            block.s_start.configure(from_=t_start, to=t_end, number_of_steps=n_steps)
-            block.s_end.configure(from_=t_start,   to=t_end, number_of_steps=n_steps)
-            block.var_start.set(t_start)
-            block.var_end.set(t_end)
-
-            block.start_line = block.ax.axvline(t_start, color=THEME["accent"], linewidth=2, visible=False)
-            block.end_line   = block.ax.axvline(t_end,   color=THEME["accent"], linewidth=2, visible=False)
-
-            block.canvas.draw()
-            print(f"  Plotted [{block.lesion}]: {mask.sum()} dots, "
-                  f"{fit_mask.sum()} fitted pts, y=[{y_lo:.1f}, {y_hi:.1f}]")
+            print(f"  Plotted [{block.lesion}]: dots={n_pts}, "
+                  f"fitted curve pts={len(ft)}")
 
         except Exception as exc:
             import traceback
@@ -1371,7 +1475,7 @@ class CurvesROIPage(ctk.CTkFrame):
             return
 
         from tkinter import simpledialog
-        idx         = block.selected_idx
+        idx          = block.selected_idx
         current_time = block.times[idx]
         current_hu   = block.values[idx]
 
@@ -1416,7 +1520,7 @@ class CurvesROIPage(ctk.CTkFrame):
     def _clear_fitted_curve(self, block) -> None:
         roi = self.pre_roi if block.lesion == "pre" else self.post_roi
         if roi:
-            roi.fitted_curve      = []
+            roi.fitted_curve       = []
             roi.fitted_time_points = []
 
     def _restore_range_lines(self, block) -> None:
