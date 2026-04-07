@@ -6,10 +6,10 @@ Model:  ct(t) = K * (t - t_AT)^alpha * exp(-(t - t_AT) / beta)
         where t_AT = contrast arrival time, and (t - t_AT) is clamped to 0.
 
 Constraint approach:
-  - First, fit unconstrained to get K, alpha, beta.
+  - First, fit (optionally weighted) to get K, alpha, beta.
   - If constraint_points exist, LOCK K and alpha, sweep beta over a
     fine grid, pick the beta that minimizes constraint error while
-    keeping the peak within 5% of the unconstrained peak.
+    keeping the peak within tolerance.
 """
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ def fit_modified_gamma_variate(
     num_points_to_consider: int,
     contrast_arrival_time: int,
     constraint_points: list = None,
+    weights: np.ndarray = None,
 ) -> GammaVariateFitResult:
 
     time = np.asarray(time, dtype=float).flatten()
@@ -69,17 +70,33 @@ def fit_modified_gamma_variate(
     p0 = [K_init, alpha_init, beta_init]
     converged = True
 
+    # ── Build sigma (inverse weights) for curve_fit ───────────────────
+    #    sigma[i] = 1/w[i]  →  higher weight = lower sigma = tighter fit
+    sigma = None
+    if weights is not None:
+        w = np.asarray(weights, dtype=float).flatten()
+        if num_points_to_consider > 0:
+            w = w[:num_points_to_consider]
+        w = np.maximum(w, 0.1)
+        sigma = 1.0 / w
+
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", OptimizeWarning)
-            estimated, _ = curve_fit(
-                model, times, datas,
+            fit_kwargs = dict(
+                f=model,
+                xdata=times,
+                ydata=datas,
                 p0=p0,
                 bounds=([0, 0, 1e-6], [np.inf, 10, np.inf]),
                 maxfev=3000,
                 ftol=1e-10,
                 xtol=1e-10,
             )
+            if sigma is not None:
+                fit_kwargs["sigma"] = sigma
+                fit_kwargs["absolute_sigma"] = False
+            estimated, _ = curve_fit(**fit_kwargs)
     except (OptimizeWarning, RuntimeError) as exc:
         logger.warning(f"curve_fit did not converge: {exc}")
         estimated = np.array(p0, dtype=float)
@@ -94,70 +111,69 @@ def fit_modified_gamma_variate(
     fitted_data = model(stretched_time, K_fit, alpha_fit, beta_fit)
     unconstrained_peak = float(np.max(fitted_data))
 
-    # -----------------------------------------------------------------------
-    # Constraint: sweep beta, pick best that passes through constraint point
-    # while keeping peak intact (within 5%).
+    # ───────────────────────────────────────────────────────────────────
+    # Constraint sweep: adjust beta to pass through the washout point
+    # while keeping the peak within tolerance.
     #
-    # The gamma variate peak height depends on K, alpha AND beta:
-    #   peak occurs at t_peak = t_at + alpha * beta
-    #   peak value = K * (alpha * beta)^alpha * exp(-alpha)
-    #
-    # So changing beta DOES shift the peak. We need to find the beta that
-    # best hits the constraint while keeping the peak close.
-    #
-    # Strategy: sweep beta from 0.2*original to 3*original in 2000 steps,
-    # evaluate constraint error at each, pick the one with smallest
-    # constraint error among those where peak stays within 5%.
-    # -----------------------------------------------------------------------
+    # Pass 1: 15% peak tolerance
+    # Pass 2: 25% peak tolerance (fallback)
+    # ───────────────────────────────────────────────────────────────────
     if constraint_points:
         valid_constraints = [
             (t_c, y_c) for t_c, y_c in constraint_points
-            if t_c > t_at and y_c > 0
+            if t_c > t_at and y_c >= 0
         ]
 
         if valid_constraints:
             beta_original = beta_fit
-            n_sweep = 2000
-            beta_lo = beta_original * 0.2
-            beta_hi = beta_original * 3.0
+            n_sweep = 3000
+            beta_lo = beta_original * 0.15
+            beta_hi = beta_original * 4.0
             betas = np.linspace(beta_lo, beta_hi, n_sweep)
 
-            best_beta = beta_original
-            best_constraint_err = float('inf')
+            found = False
+            for peak_tol in (0.15, 0.25):
+                best_beta = beta_original
+                best_constraint_err = float('inf')
 
-            for b_candidate in betas:
-                # Check peak deviation
-                candidate_curve = model(stretched_time, K_fit, alpha_fit, b_candidate)
-                candidate_peak = float(np.max(candidate_curve))
+                for b_candidate in betas:
+                    candidate_curve = model(stretched_time, K_fit, alpha_fit, b_candidate)
+                    candidate_peak = float(np.max(candidate_curve))
 
-                if unconstrained_peak > 0:
-                    peak_deviation = abs(candidate_peak - unconstrained_peak) / unconstrained_peak
-                    if peak_deviation > 0.05:
-                        continue  # skip — peak moved too much
+                    if unconstrained_peak > 0:
+                        peak_deviation = abs(candidate_peak - unconstrained_peak) / unconstrained_peak
+                        if peak_deviation > peak_tol:
+                            continue
 
-                # Compute constraint error
-                c_err = 0.0
-                for t_c, y_c in valid_constraints:
-                    y_pred = float(model(np.array([t_c]), K_fit, alpha_fit, b_candidate)[0])
-                    c_err += (y_pred - y_c) ** 2
+                    c_err = 0.0
+                    for t_c, y_c in valid_constraints:
+                        y_pred = float(model(np.array([t_c]), K_fit, alpha_fit, b_candidate)[0])
+                        c_err += (y_pred - y_c) ** 2
 
-                if c_err < best_constraint_err:
-                    best_constraint_err = c_err
-                    best_beta = b_candidate
+                    if c_err < best_constraint_err:
+                        best_constraint_err = c_err
+                        best_beta = b_candidate
 
-            if best_beta != beta_original:
-                beta_fit = best_beta
-                fitted_data = model(stretched_time, K_fit, alpha_fit, beta_fit)
-                new_peak = float(np.max(fitted_data))
-                print(f"  [CONSTRAINT] Beta adjusted: {beta_original:.4f} → {beta_fit:.4f} "
-                      f"(peak: {unconstrained_peak:.1f} → {new_peak:.1f})")
-                for t_c, y_c in valid_constraints:
-                    y_actual = float(model(np.array([t_c]), K_fit, alpha_fit, beta_fit)[0])
-                    print(f"    target y={y_c:.2f} at t={t_c:.2f} → fitted y={y_actual:.2f} "
-                          f"(err={abs(y_actual - y_c):.2f})")
-            else:
-                print(f"  [CONSTRAINT] No beta in range could satisfy constraint "
-                      f"while keeping peak within 5%. Keeping unconstrained fit.")
+                if best_beta != beta_original:
+                    beta_fit = best_beta
+                    fitted_data = model(stretched_time, K_fit, alpha_fit, beta_fit)
+                    new_peak = float(np.max(fitted_data))
+                    print(f"  [CONSTRAINT] Beta: {beta_original:.4f} → {beta_fit:.4f} "
+                          f"(peak: {unconstrained_peak:.1f} → {new_peak:.1f}, "
+                          f"tol={peak_tol*100:.0f}%)")
+                    for t_c, y_c in valid_constraints:
+                        y_actual = float(model(np.array([t_c]), K_fit, alpha_fit, beta_fit)[0])
+                        print(f"    target y={y_c:.1f} at t={t_c:.2f} → "
+                              f"fitted y={y_actual:.1f} (err={abs(y_actual - y_c):.1f})")
+                    found = True
+                    break
+                else:
+                    print(f"  [CONSTRAINT] No beta found at {peak_tol*100:.0f}% tolerance, "
+                          f"trying wider …")
+
+            if not found:
+                print(f"  [CONSTRAINT] Could not satisfy constraint at any tolerance. "
+                      f"Keeping unconstrained fit.")
 
     fitted_at_samples = model(time, K_fit, alpha_fit, beta_fit)
     abs_diff_sum = float(np.sum(np.abs(data - fitted_at_samples)))
