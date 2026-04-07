@@ -224,6 +224,8 @@ def get_best_sample(
                 # print("roi_rows:", roi_rows)
                 # print("roi_cols:", roi_cols)
                 # print("img slice min/max:", img.min(), img.max())
+
+
                     
 
     # ── Interpolation  (MATLAB: if timePoints < 25) ──────────────────────────
