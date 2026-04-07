@@ -11,7 +11,7 @@ PAGES = [
 
 
 class SidebarNav(ctk.CTkFrame):
-    def __init__(self, master, on_navigate, on_next, get_current_key):
+    def __init__(self, master, on_navigate, on_back, on_next, get_current_key):
         super().__init__(
             master,
             fg_color=THEME["panel"],
@@ -21,6 +21,7 @@ class SidebarNav(ctk.CTkFrame):
         )
 
         self.on_navigate = on_navigate
+        self.on_back = on_back
         self.on_next = on_next
         self.get_current_key = get_current_key
 
@@ -73,14 +74,18 @@ class SidebarNav(ctk.CTkFrame):
         footer.grid(row=2, column=0, sticky="ew", padx=16, pady=(12, 18))
         footer.grid_columnconfigure(0, weight=1)
 
-        self.current_label = ctk.CTkLabel(
+        self.back_btn = ctk.CTkButton(
             footer,
-            text="Current Step",
-            font=FONTS["small"],
-            text_color=THEME["muted"],
-            anchor="w",
+            text="Back",
+            height=40,
+            corner_radius=12,
+            fg_color=THEME["panel_2"],
+            hover_color=THEME["panel_3"],
+            text_color=THEME["text"],
+            font=FONTS["body"],
+            command=self.on_back,
         )
-        self.current_label.grid(row=0, column=0, sticky="ew", padx=8, pady=(0, 10))
+        self.back_btn.grid(row=0, column=0, sticky="ew", pady=(0, 10))
 
         self.next_btn = ctk.CTkButton(
             footer,
@@ -99,11 +104,10 @@ class SidebarNav(ctk.CTkFrame):
 
     def refresh(self):
         current = self.get_current_key()
-        current_label = next((label for label, key in PAGES if key == current), "Current Step")
-        self.current_label.configure(text=current_label)
-
         keys = [key for _, key in PAGES]
+        is_first = current == keys[0]
         is_last = current == keys[-1]
+        self.back_btn.configure(state="disabled" if is_first else "normal")
         self.next_btn.configure(state="disabled" if is_last else "normal")
 
         for key, btn in self.step_buttons.items():

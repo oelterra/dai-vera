@@ -717,6 +717,21 @@ class ImportCTPage(ctk.CTkFrame):
             button_hover_color=THEME["accent_2"],
         )
         slider.grid(row=0, column=0, sticky="ew")
+
+        value_label = ctk.CTkLabel(
+            line,
+            text=f"{float(var.get()):.2f}",
+            width=48,
+            font=FONTS["small"],
+            text_color=THEME["text"],
+        )
+        value_label.grid(row=0, column=1, sticky="e", padx=(10, 0))
+
+        def update_value(_value=None):
+            value_label.configure(text=f"{float(var.get()):.2f}")
+
+        var.trace_add("write", lambda *_args: update_value())
+        update_value()
         return row + 1, slider
 
     def _compact_field(self, parent, row, col, label, kind, var, options=None):

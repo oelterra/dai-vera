@@ -459,14 +459,30 @@ class CurvesROIPage(ctk.CTkFrame):
         line.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(line, text=label, font=FONTS["body"]).grid(row=0, column=0, sticky="w", padx=(0, 10))
-        ctk.CTkSlider(
+        slider = ctk.CTkSlider(
             line, from_=0, to=1, variable=var,
             fg_color=THEME["border"],
             progress_color=THEME["accent"],
             button_color=THEME["accent"],
             button_hover_color=THEME["accent_2"],
             command=lambda _=None: self._sync_window_to_state(),
-        ).grid(row=0, column=1, sticky="ew")
+        )
+        slider.grid(row=0, column=1, sticky="ew")
+
+        value_label = ctk.CTkLabel(
+            line,
+            text=f"{float(var.get()):.2f}",
+            width=48,
+            font=FONTS["small"],
+            text_color=THEME["text"],
+        )
+        value_label.grid(row=0, column=2, sticky="e", padx=(10, 0))
+
+        def update_value(*_args):
+            value_label.configure(text=f"{float(var.get()):.2f}")
+
+        var.trace_add("write", update_value)
+        update_value()
 
     def _update_ctp_image_size(self) -> None:
         parent = self.img_canvas.master
