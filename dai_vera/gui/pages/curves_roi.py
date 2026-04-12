@@ -230,6 +230,10 @@ class CurvesROIPage(ctk.CTkFrame):
         self.pre_roi:  Optional[ROIObject] = None
         self.post_roi: Optional[ROIObject] = None
 
+        # freehand polygon state
+        from dai_vera.freehand_roi import FreehandROI
+        self._freehand = FreehandROI(self)
+
         # ── build widgets ─────────────────────────────────────────────────────
         self._build_left_ctp_and_controls()
         self._build_right_graphs()
@@ -362,10 +366,10 @@ class CurvesROIPage(ctk.CTkFrame):
         row1.grid_columnconfigure(3, weight=1)
 
         ctk.CTkLabel(row1, text="Sample ROI", font=FONTS["body"]).grid(row=0, column=0, sticky="w", padx=(0, 10))
-        self.var_sample_roi = ctk.StringVar(value="2 x 2")
+        self.var_sample_roi = ctk.StringVar(value="1 x 1")
         ctk.CTkOptionMenu(
             row1,
-            values=["2 x 2", "4 x 4", "6 x 6", "8 x 8"],
+            values=["1 x 1", "2 x 2", "3 x 3"],
             variable=self.var_sample_roi,
             fg_color=THEME["input_bg"],
             button_color=THEME["border"],
@@ -376,10 +380,10 @@ class CurvesROIPage(ctk.CTkFrame):
         ).grid(row=0, column=1, sticky="ew")
 
         ctk.CTkLabel(row1, text="Search ROI", font=FONTS["body"]).grid(row=0, column=2, sticky="w", padx=(18, 10))
-        self.var_search_roi = ctk.StringVar(value="1 x 1")
+        self.var_search_roi = ctk.StringVar(value="6 x 6")
         ctk.CTkOptionMenu(
             row1,
-            values=["1 x 1", "2 x 2", "3 x 3", "4 x 4"],
+            values=["6 x 6", "8 x 8", "10 x 10", "12 x 12", "16 x 16", "20 x 20", "freehand"],
             variable=self.var_search_roi,
             fg_color=THEME["input_bg"],
             button_color=THEME["border"],
@@ -405,14 +409,14 @@ class CurvesROIPage(ctk.CTkFrame):
             row3, text="Set Pre Lesion",
             fg_color=THEME["panel_3"], hover_color=THEME["border_2"],
             height=34, corner_radius=12,
-            command=lambda: self._on_set_lesion("pre"),
+            command=lambda: self._freehand.on_lesion_clicked("pre"),
         ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
         ctk.CTkButton(
             row3, text="Set Post Lesion",
             fg_color=THEME["panel_3"], hover_color=THEME["border_2"],
             height=34, corner_radius=12,
-            command=lambda: self._on_set_lesion("post"),
+            command=lambda: self._freehand.on_lesion_clicked("post"),
         ).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         # row 4 — Play / speed / height-positive
@@ -1204,8 +1208,9 @@ class CurvesROIPage(ctk.CTkFrame):
     # =========================================================================
     # Set Lesion
     # =========================================================================
-
     def _on_set_lesion(self, lesion: LesionType) -> None:
+        if self.var_search_roi.get().strip().lower() == "freehand":
+            return
         if self.current_x is None or self.current_y is None:
             print(f"[{lesion}] Click on the image first")
             return
@@ -1334,6 +1339,7 @@ class CurvesROIPage(ctk.CTkFrame):
         values_arr = np.asarray(block.values, dtype=float)
 
         self._draw_curve_to_block(block, times_arr, values_arr)
+
 
     # =========================================================================
     # Fitting handler
