@@ -484,6 +484,20 @@ class CurvesROIPage(ctk.CTkFrame):
         var.trace_add("write", update_value)
         update_value()
 
+    def _configure_slider_range(self, slider, value_var, count: int) -> None:
+        if slider is None or value_var is None:
+            return
+
+        safe_count = max(0, int(count))
+        if safe_count <= 1:
+            slider.configure(from_=1, to=2, number_of_steps=1)
+            value_var.set(1)
+            return
+
+        current_value = min(max(1, int(value_var.get())), safe_count)
+        slider.configure(from_=1, to=safe_count, number_of_steps=safe_count - 1)
+        value_var.set(current_value)
+
     def _update_ctp_image_size(self) -> None:
         parent = self.img_canvas.master
         if parent is None:
@@ -867,8 +881,8 @@ class CurvesROIPage(ctk.CTkFrame):
         self.lbl_ctp_time_val.configure(text=str(self.var_ctp_time.get()))
 
         if self.slider_ctp_slice.cget("to") != Z or self.slider_ctp_time.cget("to") != T:
-            self.slider_ctp_slice.configure(from_=1, to=max(1, Z), number_of_steps=max(1, Z - 1))
-            self.slider_ctp_time.configure(from_=1, to=max(1, T), number_of_steps=max(1, T - 1))
+            self._configure_slider_range(self.slider_ctp_slice, self.var_ctp_slice, Z)
+            self._configure_slider_range(self.slider_ctp_time, self.var_ctp_time, T)
 
         t_idx = min(max(0, int(self.var_ctp_time.get())  - 1), T - 1)
         z_idx = min(max(0, int(self.var_ctp_slice.get()) - 1), Z - 1)

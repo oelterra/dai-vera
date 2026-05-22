@@ -1,11 +1,18 @@
 import threading
 import tkinter as tk
+import platform
 
 import customtkinter as ctk
 import numpy as np
 from PIL import Image, ImageTk
+from tkinter import filedialog
 
 from dai_vera.gui.theme import THEME, FONTS
+from dai_vera.integration.slicer_launcher import (
+    find_slicer_executable,
+    launch_slicer_with_cta,
+    normalize_slicer_executable,
+)
 from dai_vera.segmentation.mask_loader import align_mask_to_cta_volume, load_nifti_mask
 from dai_vera.segmentation.totalseg_runner import run_coronary_segmentation
 
@@ -19,6 +26,7 @@ class VesselAnalysisPage(ctk.CTkFrame):
 
         self.var_overlay = ctk.BooleanVar(value=bool(getattr(self.state, "show_coronary_overlay", True)))
         self.var_segmentation_status = ctk.StringVar(value="")
+        self.var_slicer_status = ctk.StringVar(value="")
         self.var_workspace_hint = ctk.StringVar(value="")
         self.var_cta_slice = ctk.IntVar(value=max(1, int(getattr(self.state, "cta_slice", 1))))
 
@@ -40,6 +48,7 @@ class VesselAnalysisPage(ctk.CTkFrame):
 
         self._apply_button_styles()
         self._refresh_segmentation_ui()
+        self._refresh_slicer_ui()
         self.after(50, self._refresh_workspace)
 
     def _build_left_panel(self):
@@ -131,6 +140,44 @@ class VesselAnalysisPage(ctk.CTkFrame):
             wraplength=360,
         )
         self.lbl_segmentation_status.grid(row=6, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 14))
+
+        ctk.CTkLabel(params, text="3D Slicer Handoff", font=FONTS["h2"]).grid(
+            row=7, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 8)
+        )
+
+        self.btn_open_slicer = ctk.CTkButton(
+            params,
+            text="Open CTA in 3D Slicer",
+            height=36,
+            corner_radius=12,
+            fg_color=THEME["accent"],
+            hover_color=THEME["accent_2"],
+            text_color="black",
+            command=self._open_cta_in_slicer,
+        )
+        self.btn_open_slicer.grid(row=8, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 8))
+
+        self.btn_choose_slicer = ctk.CTkButton(
+            params,
+            text="Choose 3D Slicer App",
+            height=34,
+            corner_radius=12,
+            fg_color=THEME["panel_3"],
+            hover_color=THEME["border_2"],
+            text_color=THEME["text"],
+            command=self._choose_slicer_executable,
+        )
+        self.btn_choose_slicer.grid(row=9, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 8))
+
+        self.lbl_slicer_status = ctk.CTkLabel(
+            params,
+            textvariable=self.var_slicer_status,
+            font=FONTS["small"],
+            text_color=THEME["muted"],
+            justify="left",
+            wraplength=360,
+        )
+        self.lbl_slicer_status.grid(row=10, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 14))
 
         actions = ctk.CTkFrame(self.left_outer, fg_color="transparent")
         actions.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
@@ -321,9 +368,70 @@ class VesselAnalysisPage(ctk.CTkFrame):
             state="normal" if self.state.cta_coronary_mask is not None or self.state.cta_coronary_mask_path else "disabled"
         )
 
+    def _refresh_slicer_ui(self):
+        configured_path = getattr(self.state, "slicer_executable_path", "")
+        resolved_path = find_slicer_executable(configured_path)
+        if resolved_path:
+            if not configured_path:
+                self.state.slicer_executable_path = resolved_path
+            status_text = f"3D Slicer ready.\nApp: {resolved_path}"
+        else:
+            status_text = "3D Slicer not configured yet. Choose the Slicer application before opening CTA there."
+
+        self.var_slicer_status.set(status_text)
+        has_cta = bool(self.state.cta_folder and self.state.cta_volume)
+        self.btn_open_slicer.configure(state="normal" if resolved_path and has_cta else "disabled")
+
+    def _choose_slicer_executable(self):
+        if platform.system() == "Darwin":
+            selected = filedialog.askdirectory(
+                parent=self.winfo_toplevel(),
+                title="Choose 3D Slicer.app",
+                mustexist=True,
+            )
+        else:
+            selected = filedialog.askopenfilename(
+                parent=self.winfo_toplevel(),
+                title="Choose 3D Slicer Application",
+            )
+        if not selected:
+            return
+
+        normalized = normalize_slicer_executable(selected)
+        self.state.slicer_executable_path = normalized
+        self._refresh_slicer_ui()
+
+    def _open_cta_in_slicer(self):
+        if not self.state.cta_folder or not self.state.cta_volume:
+            self.var_slicer_status.set("Load CTA data on the Import CT page before opening 3D Slicer.")
+            self._refresh_workspace()
+            return
+
+        slicer_executable = find_slicer_executable(getattr(self.state, "slicer_executable_path", ""))
+        if not slicer_executable:
+            self.var_slicer_status.set("3D Slicer was not found. Choose the Slicer application first.")
+            self._refresh_slicer_ui()
+            return
+
+        try:
+            launch_slicer_with_cta(
+                slicer_executable=slicer_executable,
+                cta_folder=self.state.cta_folder,
+                cta_volume=self.state.cta_volume,
+            )
+        except Exception as exc:
+            self.var_slicer_status.set(str(exc))
+            return
+
+        self.state.slicer_executable_path = slicer_executable
+        self.var_slicer_status.set(
+            f"Opened 3D Slicer with the current CTA handoff and vessel workflow scaffold.\nSource folder: {self.state.cta_folder}"
+        )
+
     def _refresh_workspace(self):
         volume = getattr(self.state, "cta_volume", None)
         mode = self.selected_view.get().replace("_", " ").title()
+        self._refresh_slicer_ui()
 
         if not volume:
             self._configure_cta_slice_slider(0)
@@ -392,7 +500,10 @@ class VesselAnalysisPage(ctk.CTkFrame):
     def _run_segmentation_worker(self):
         try:
             print("Running coronary segmentation...")
-            mask_path = run_coronary_segmentation(self.state.cta_folder)
+            mask_path = run_coronary_segmentation(
+                self.state.cta_folder,
+                cta_volume=self.state.cta_volume,
+            )
             print("Loading coronary mask...")
             mask = load_nifti_mask(mask_path)
             aligned_mask = align_mask_to_cta_volume(mask, self.state.cta_volume["pixels"].shape)

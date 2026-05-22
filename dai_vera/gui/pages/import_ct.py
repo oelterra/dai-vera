@@ -1085,6 +1085,20 @@ class ImportCTPage(ctk.CTkFrame):
                     pass
         return 1.0
 
+    def _configure_slider_range(self, slider, value_var, count: int):
+        if slider is None or value_var is None:
+            return
+
+        safe_count = max(0, int(count))
+        if safe_count <= 1:
+            slider.configure(from_=1, to=2, number_of_steps=1)
+            value_var.set(1)
+            return
+
+        current_value = min(max(1, int(value_var.get())), safe_count)
+        slider.configure(from_=1, to=safe_count, number_of_steps=safe_count - 1)
+        value_var.set(current_value)
+
     def _configure_sliders_from_volume(self, kind: str, vol: dict):
         T, Z, _, _ = vol["shape"]
 
@@ -1093,7 +1107,8 @@ class ImportCTPage(ctk.CTkFrame):
         time_row = self._view[kind]["time_row"]
 
         if slice_slider is not None:
-            slice_slider.configure(from_=1, to=max(1, Z), number_of_steps=max(1, Z - 1))
+            slice_var = self.ctp_slice_index if kind == "CTP" else self.cta_slice_index
+            self._configure_slider_range(slice_slider, slice_var, Z)
             if kind == "CTP":
                 self.ctp_slice_index.set(min(max(1, int(self.ctp_slice_index.get())), Z))
                 self.state.ctp_slice = int(self.ctp_slice_index.get())
@@ -1105,15 +1120,14 @@ class ImportCTPage(ctk.CTkFrame):
             if time_row is not None:
                 time_row.grid()
             if time_slider is not None:
-                time_slider.configure(from_=1, to=max(1, T), number_of_steps=max(1, T - 1))
-                self.ctp_time_index.set(min(max(1, int(self.ctp_time_index.get())), T))
+                self._configure_slider_range(time_slider, self.ctp_time_index, T)
                 self.state.ctp_time = int(self.ctp_time_index.get())
         else:
             # CTA has no time points -> remove bottom slider
             self.cta_time_index.set(1)
             self.state.cta_time = 1
             if time_slider is not None:
-                time_slider.configure(from_=1, to=1, number_of_steps=1)
+                self._configure_slider_range(time_slider, self.cta_time_index, 1)
             if time_row is not None:
                 time_row.grid_remove()
 

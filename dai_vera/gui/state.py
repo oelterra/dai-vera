@@ -19,6 +19,7 @@ class AppState:
     cta_segmentation_error: str = ""
     cta_segmentation_in_progress: bool = False
     show_coronary_overlay: bool = True
+    slicer_executable_path: str = ""
 
     # ---------------- Vendor ----------------
     ctp_vendor: str = ""
